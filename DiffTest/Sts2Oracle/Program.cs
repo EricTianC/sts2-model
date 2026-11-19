@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Numerics;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Sts2Oracle;
 
@@ -29,6 +31,9 @@ internal sealed class MegaRandomOracle
     {
         _s0 = s0; _s1 = s1; _s2 = s2; _s3 = s3;
     }
+
+    public static MegaRandomOracle FromState(ulong s0, ulong s1, ulong s2, ulong s3) =>
+        new(s0, s1, s2, s3);
 
     public MegaRandomOracle Clone() => new(_s0, _s1, _s2, _s3);
 
@@ -74,6 +79,8 @@ internal sealed class RngOracle
 
     public RngOracle(ulong seed) { _random = new MegaRandomOracle(seed); Counter = 0; }
     private RngOracle(MegaRandomOracle state, int counter) { _random = state; Counter = counter; }
+    public static RngOracle FromState(int counter, ulong s0, ulong s1, ulong s2, ulong s3) =>
+        new(MegaRandomOracle.FromState(s0, s1, s2, s3), counter);
     public RngOracle Clone() => new(_random.Clone(), Counter);
     public ulong NextUnsignedLong() { Counter++; return _random.NextULongInner(); }
     public int NextInt(int maxExclusive) => maxExclusive <= 0 ? 0 : Math.Min(_random.Next(maxExclusive), maxExclusive - 1);
@@ -852,25 +859,29 @@ public static class Program
     }
     private sealed class TCard
     {
-        public int InstId; public string Entry = ""; public int Cost; public int UpgradeLevel;
-        public TCard Clone() => new() { InstId = InstId, Entry = Entry, Cost = Cost, UpgradeLevel = UpgradeLevel };
+        public int InstId; public string Entry = ""; public string CardType = "attack"; public int Cost; public int UpgradeLevel;
+        public int BaseDamage; public int BaseBlock; public bool GainsBlock;
+        public TCard Clone() => new() { InstId = InstId, Entry = Entry, CardType = CardType, Cost = Cost, UpgradeLevel = UpgradeLevel, BaseDamage = BaseDamage, BaseBlock = BaseBlock, GainsBlock = GainsBlock };
     }
     private sealed class TPlayer
     {
         public int Pid; public int Cid; public int Energy; public int BaseMaxEnergy; public int Stars; public int TurnNumber;
-        public bool HasPotion;
+        public List<string?> Potions = new();
+        public List<string> Relics = new();
         public List<TCard> Hand = new(); public List<TCard> Draw = new(); public List<TCard> Discard = new(); public List<TCard> Exhaust = new();
-        public TPlayer Clone() => new() { Pid = Pid, Cid = Cid, Energy = Energy, BaseMaxEnergy = BaseMaxEnergy, Stars = Stars, TurnNumber = TurnNumber, HasPotion = HasPotion, Hand = Hand.Select(c => c.Clone()).ToList(), Draw = Draw.Select(c => c.Clone()).ToList(), Discard = Discard.Select(c => c.Clone()).ToList(), Exhaust = Exhaust.Select(c => c.Clone()).ToList() };
+        public TPlayer Clone() => new() { Pid = Pid, Cid = Cid, Energy = Energy, BaseMaxEnergy = BaseMaxEnergy, Stars = Stars, TurnNumber = TurnNumber, Potions = new List<string?>(Potions), Relics = new List<string>(Relics), Hand = Hand.Select(c => c.Clone()).ToList(), Draw = Draw.Select(c => c.Clone()).ToList(), Discard = Discard.Select(c => c.Clone()).ToList(), Exhaust = Exhaust.Select(c => c.Clone()).ToList() };
     }
     private sealed class TSimState
     {
-        public int RoundNumber = 1; public int Side = 1; public bool IsInProgress = true; public bool IsEnding = false;
+        public ulong RunSeed = 0; public int ActIndex = 0; public int Gold = 99; public int TotalFloors = 0;
+        public int CombatId = 1; public int RoundNumber = 1; public int Side = 1; public bool IsInProgress = true; public bool IsEnding = false;
+        public bool HasCombat = true;
         public RngOracle Rng = new(1);
         public int NextInstanceId = 1000;
-        public int NextActionId = 0; public int NextChecksumId = 0;
+        public int NextActionId = 0; public int NextHookId = 0; public bool IsInCombat = true; public int CanceledCount = 0; public int NextChecksumId = 0;
         public List<TCreature> Creatures = new();
         public List<TPlayer> Players = new();
-        public TSimState Clone() => new() { RoundNumber = RoundNumber, Side = Side, IsInProgress = IsInProgress, IsEnding = IsEnding, Rng = Rng.Clone(), NextInstanceId = NextInstanceId, NextActionId = NextActionId, NextChecksumId = NextChecksumId, Creatures = Creatures.Select(c => c.Clone()).ToList(), Players = Players.Select(p => p.Clone()).ToList() };
+        public TSimState Clone() => new() { RunSeed = RunSeed, ActIndex = ActIndex, Gold = Gold, TotalFloors = TotalFloors, CombatId = CombatId, RoundNumber = RoundNumber, Side = Side, IsInProgress = IsInProgress, IsEnding = IsEnding, HasCombat = HasCombat, Rng = Rng.Clone(), NextInstanceId = NextInstanceId, NextActionId = NextActionId, NextHookId = NextHookId, IsInCombat = IsInCombat, CanceledCount = CanceledCount, NextChecksumId = NextChecksumId, Creatures = Creatures.Select(c => c.Clone()).ToList(), Players = Players.Select(p => p.Clone()).ToList() };
         public TCreature? FindC(int id) => Creatures.FirstOrDefault(c => c.Id == id);
         public TPlayer? FindP(int pid) => Players.FirstOrDefault(p => p.Pid == pid);
     }
@@ -878,17 +889,19 @@ public static class Program
     private static ulong ComputeTimelineChecksum(TSimState st)
     {
         ulong h = FnvOffsetBasis;
-        h = Fnv1aUInt64(h, 0); // runSeed = 0
-        h = Fnv1aNat(h, 0);    // actIndex = 0
-        h = Fnv1aNat(h, 99);   // gold = 99
-        h = Fnv1aNat(h, 0);    // totalFloors = 0
+        h = Fnv1aUInt64(h, st.RunSeed);
+        h = Fnv1aNat(h, st.ActIndex);
+        h = Fnv1aNat(h, st.Gold);
+        h = Fnv1aNat(h, st.TotalFloors);
         h = Fnv1aNat(h, st.NextActionId);
-        h = Fnv1aNat(h, 0);    // nextHookId = 0
-        h = Fnv1aByte(h, 1);   // queueSet.isInCombat = true
-        h = Fnv1aNat(h, 0);    // canceledCount = 0
+        h = Fnv1aNat(h, st.NextHookId);
+        h = Fnv1aByte(h, (byte)(st.IsInCombat ? 1 : 0));
+        h = Fnv1aNat(h, st.CanceledCount);
         h = Fnv1aNat(h, st.NextChecksumId);
-        h = Fnv1aByte(h, 1);   // combat = some
-        h = Fnv1aNat(h, 1);    // combatId = 1
+        if (!st.HasCombat)
+            return Fnv1aByte(h, 0);
+        h = Fnv1aByte(h, 1);
+        h = Fnv1aNat(h, st.CombatId);
         h = Fnv1aNat(h, st.RoundNumber);
         h = Fnv1aNat(h, st.Side);
         h = Fnv1aByte(h, (byte)(st.IsInProgress ? 1 : 0));
@@ -917,7 +930,7 @@ public static class Program
         foreach (var p in st.Players)
         {
             h = Fnv1aNat(h, p.Pid);
-            h = Fnv1aNat(h, p.Pid == 1 ? 1 : 0); // potions.length
+            h = Fnv1aNat(h, p.Potions.Count);
             h = Fnv1aByte(h, 1);
             h = Fnv1aNat(h, p.Energy);
             h = Fnv1aNat(h, p.Stars);
@@ -1036,8 +1049,8 @@ public static class Program
         {
             st.NextActionId++;
             var p = st.FindP(1);
-            if (p == null || !st.IsInProgress || !p.HasPotion) return;
-            p.HasPotion = false;
+            if (p == null || !st.IsInProgress || p.Potions.Count == 0 || p.Potions[0] == null) return;
+            p.Potions[0] = null;
             TApplyDamageHit(st, p.Cid, 200, 20m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
             TCheckWin(st);
         }
@@ -1136,7 +1149,7 @@ public static class Program
         init.Creatures.Add(new TCreature { Id = 200, Entry = "COOP_GUARDIAN", Side = 2, Hp = enemyHp, MaxHp = enemyHp, MoveId = "SLAM" });
         init.Players.Add(new TPlayer
         {
-            Pid = 1, Cid = 101, Energy = 5, BaseMaxEnergy = 3, TurnNumber = 1, HasPotion = true,
+            Pid = 1, Cid = 101, Energy = 5, BaseMaxEnergy = 3, TurnNumber = 1, Potions = new List<string?> { "FIRE_POTION" },
             Hand = new()
             {
                 new TCard { InstId = 1001, Entry = "BASH", Cost = 2 },
@@ -1146,7 +1159,7 @@ public static class Program
         });
         init.Players.Add(new TPlayer
         {
-            Pid = 2, Cid = 102, Energy = 5, BaseMaxEnergy = 3, TurnNumber = 1, HasPotion = false,
+            Pid = 2, Cid = 102, Energy = 5, BaseMaxEnergy = 3, TurnNumber = 1, Potions = new List<string?>(),
             Hand = new()
             {
                 new TCard { InstId = 2001, Entry = "DEFEND_IRONCLAD", Cost = 1 },
@@ -1188,6 +1201,800 @@ public static class Program
         return $"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{fullCsum}|{(m0 ? 1 : 0)},{(mm ? 1 : 0)},{(mf ? 1 : 0)}";
     }
 
+    // ========================================================================
+    // 12. TRACE_JSON (Versioned External Trace Wire Protocol Interop)
+    // ========================================================================
+    private sealed class WireModelId
+    {
+        [JsonPropertyName("category")] public string Category { get; set; } = "";
+        [JsonPropertyName("entry")] public string Entry { get; set; } = "";
+    }
+
+    private sealed class WirePower
+    {
+        [JsonPropertyName("instanceId")] public int InstanceId { get; set; }
+        [JsonPropertyName("modelEntry")] public string ModelEntry { get; set; } = "";
+        [JsonPropertyName("powerType")] public string PowerType { get; set; } = "buff";
+        [JsonPropertyName("stackType")] public string StackType { get; set; } = "counter";
+        [JsonPropertyName("allowNegative")] public bool AllowNegative { get; set; }
+        [JsonPropertyName("amount")] public int Amount { get; set; }
+    }
+
+    private sealed class WireCard
+    {
+        [JsonPropertyName("instanceId")] public int InstanceId { get; set; }
+        [JsonPropertyName("modelEntry")] public string ModelEntry { get; set; } = "";
+        [JsonPropertyName("ownerId")] public int OwnerId { get; set; } = 1;
+        [JsonPropertyName("cardType")] public string CardType { get; set; } = "attack";
+        [JsonPropertyName("rarity")] public string Rarity { get; set; } = "common";
+        [JsonPropertyName("targetType")] public string TargetType { get; set; } = "anyEnemy";
+        [JsonPropertyName("baseCost")] public int BaseCost { get; set; } = 1;
+        [JsonPropertyName("costsX")] public bool CostsX { get; set; }
+        [JsonPropertyName("starCost")] public int StarCost { get; set; }
+        [JsonPropertyName("upgradeLevel")] public int UpgradeLevel { get; set; }
+        [JsonPropertyName("baseDamage")] public int BaseDamage { get; set; }
+        [JsonPropertyName("baseBlock")] public int BaseBlock { get; set; }
+        [JsonPropertyName("gainsBlock")] public bool GainsBlock { get; set; }
+    }
+
+    private sealed class WireRelic
+    {
+        [JsonPropertyName("modelEntry")] public string ModelEntry { get; set; } = "";
+        [JsonPropertyName("rarity")] public string Rarity { get; set; } = "common";
+    }
+
+    private sealed class WirePotion
+    {
+        [JsonPropertyName("modelEntry")] public string? ModelEntry { get; set; }
+    }
+
+    private sealed class WireCreature
+    {
+        [JsonPropertyName("id")] public int Id { get; set; }
+        [JsonPropertyName("modelEntry")] public string ModelEntry { get; set; } = "";
+        [JsonPropertyName("modelCategory")] public string ModelCategory { get; set; } = "MONSTER";
+        [JsonPropertyName("side")] public string Side { get; set; } = "enemy";
+        [JsonPropertyName("playerId")] public int? PlayerId { get; set; }
+        [JsonPropertyName("currentHp")] public int CurrentHp { get; set; }
+        [JsonPropertyName("maxHp")] public int MaxHp { get; set; }
+        [JsonPropertyName("block")] public int Block { get; set; }
+        [JsonPropertyName("powers")] public List<WirePower> Powers { get; set; } = new();
+        [JsonPropertyName("monsterMoveId")] public string? MonsterMoveId { get; set; }
+        [JsonPropertyName("monsterStateLog")] public List<string> MonsterStateLog { get; set; } = new();
+    }
+
+    private sealed class WirePlayer
+    {
+        [JsonPropertyName("playerId")] public int PlayerId { get; set; }
+        [JsonPropertyName("creatureId")] public int CreatureId { get; set; }
+        [JsonPropertyName("characterEntry")] public string CharacterEntry { get; set; } = "IRONCLAD";
+        [JsonPropertyName("energy")] public int Energy { get; set; } = 3;
+        [JsonPropertyName("baseMaxEnergy")] public int BaseMaxEnergy { get; set; } = 3;
+        [JsonPropertyName("stars")] public int Stars { get; set; }
+        [JsonPropertyName("turnNumber")] public int TurnNumber { get; set; } = 1;
+        [JsonPropertyName("hand")] public List<WireCard> Hand { get; set; } = new();
+        [JsonPropertyName("draw")] public List<WireCard> Draw { get; set; } = new();
+        [JsonPropertyName("discard")] public List<WireCard> Discard { get; set; } = new();
+        [JsonPropertyName("exhaust")] public List<WireCard> Exhaust { get; set; } = new();
+        [JsonPropertyName("relics")] public List<WireRelic> Relics { get; set; } = new();
+        [JsonPropertyName("potions")] public List<WirePotion> Potions { get; set; } = new();
+    }
+
+    private sealed class WireRng
+    {
+        [JsonPropertyName("counter")] public int Counter { get; set; }
+        [JsonPropertyName("s0")] public string S0 { get; set; } = "";
+        [JsonPropertyName("s1")] public string S1 { get; set; } = "";
+        [JsonPropertyName("s2")] public string S2 { get; set; } = "";
+        [JsonPropertyName("s3")] public string S3 { get; set; } = "";
+        [JsonPropertyName("seed")] public string? Seed { get; set; }
+    }
+
+    private sealed class WireCombatSnapshot
+    {
+        [JsonPropertyName("combatId")] public int CombatId { get; set; } = 1;
+        [JsonPropertyName("roundNumber")] public int RoundNumber { get; set; } = 1;
+        [JsonPropertyName("currentSide")] public string CurrentSide { get; set; } = "player";
+        [JsonPropertyName("isInProgress")] public bool IsInProgress { get; set; } = true;
+        [JsonPropertyName("isEnding")] public bool IsEnding { get; set; }
+        [JsonPropertyName("nextInstanceId")] public int NextInstanceId { get; set; } = 1000;
+        [JsonPropertyName("rng")] public WireRng Rng { get; set; } = new();
+        [JsonPropertyName("allies")] public List<WireCreature> Allies { get; set; } = new();
+        [JsonPropertyName("enemies")] public List<WireCreature> Enemies { get; set; } = new();
+        [JsonPropertyName("players")] public List<WirePlayer> Players { get; set; } = new();
+    }
+
+    private sealed class WireRunSnapshot
+    {
+        [JsonPropertyName("runSeed")] public string RunSeed { get; set; } = "0";
+        [JsonPropertyName("currentActIndex")] public int CurrentActIndex { get; set; }
+        [JsonPropertyName("ascensionLevel")] public int AscensionLevel { get; set; }
+        [JsonPropertyName("gold")] public int Gold { get; set; } = 99;
+        [JsonPropertyName("totalFloors")] public int TotalFloors { get; set; }
+        [JsonPropertyName("currentRoom")] public string CurrentRoom { get; set; } = "unassigned";
+    }
+
+    private sealed class WireInitialState
+    {
+        [JsonPropertyName("run")] public WireRunSnapshot Run { get; set; } = new();
+        [JsonPropertyName("combat")] public WireCombatSnapshot? Combat { get; set; }
+        [JsonPropertyName("playerIds")] public List<int> PlayerIds { get; set; } = new() { 1 };
+        [JsonPropertyName("nextActionId")] public int NextActionId { get; set; }
+        [JsonPropertyName("nextHookId")] public int NextHookId { get; set; }
+        [JsonPropertyName("nextChecksumId")] public int NextChecksumId { get; set; }
+        [JsonPropertyName("isInCombat")] public bool IsInCombat { get; set; } = true;
+        [JsonPropertyName("canceledCount")] public int CanceledCount { get; set; }
+    }
+
+    private sealed class WireChoiceResult
+    {
+        [JsonPropertyName("type")] public string Type { get; set; } = "skipped";
+        [JsonPropertyName("ids")] public List<int> Ids { get; set; } = new();
+        [JsonPropertyName("creatureId")] public int? CreatureId { get; set; }
+        [JsonPropertyName("index")] public int? Index { get; set; }
+    }
+
+    private sealed class WireActionPayload
+    {
+        [JsonPropertyName("type")] public string Type { get; set; } = "";
+        [JsonPropertyName("cardId")] public int? CardId { get; set; }
+        [JsonPropertyName("targetId")] public int? TargetId { get; set; }
+        [JsonPropertyName("slotIdx")] public int? SlotIdx { get; set; }
+        [JsonPropertyName("canBackOut")] public bool CanBackOut { get; set; } = true;
+        [JsonPropertyName("hookId")] public int? HookId { get; set; }
+        [JsonPropertyName("row")] public int? Row { get; set; }
+        [JsonPropertyName("col")] public int? Col { get; set; }
+        [JsonPropertyName("relicId")] public WireModelId? RelicId { get; set; }
+    }
+
+    private sealed class WireCombatReplayEvent
+    {
+        [JsonPropertyName("eventType")] public string EventType { get; set; } = "none";
+        [JsonPropertyName("playerId")] public int? PlayerId { get; set; }
+        [JsonPropertyName("payload")] public WireActionPayload? Payload { get; set; }
+        [JsonPropertyName("hookId")] public int? HookId { get; set; }
+        [JsonPropertyName("actionId")] public int? ActionId { get; set; }
+        [JsonPropertyName("choiceId")] public int? ChoiceId { get; set; }
+        [JsonPropertyName("choiceResult")] public WireChoiceResult? ChoiceResult { get; set; }
+    }
+
+    private sealed class WireOutOfCombatSyncEvent
+    {
+        [JsonPropertyName("type")] public string Type { get; set; } = "";
+        [JsonPropertyName("row")] public int Row { get; set; }
+        [JsonPropertyName("col")] public int Col { get; set; }
+        [JsonPropertyName("pointType")] public string? PointType { get; set; }
+        [JsonPropertyName("roomType")] public string? RoomType { get; set; }
+        [JsonPropertyName("optionKey")] public string? OptionKey { get; set; }
+        [JsonPropertyName("goldDelta")] public int GoldDelta { get; set; }
+        [JsonPropertyName("hpDelta")] public int HpDelta { get; set; }
+        [JsonPropertyName("cardModel")] public WireModelId? CardModel { get; set; }
+        [JsonPropertyName("goldCost")] public int GoldCost { get; set; }
+        [JsonPropertyName("healAmt")] public int HealAmt { get; set; }
+        [JsonPropertyName("goldGain")] public int GoldGain { get; set; }
+        [JsonPropertyName("relicId")] public WireModelId? RelicId { get; set; }
+        [JsonPropertyName("rarity")] public string Rarity { get; set; } = "common";
+    }
+
+    private sealed class WireIdDelta
+    {
+        [JsonPropertyName("id")] public int Id { get; set; }
+        [JsonPropertyName("delta")] public int Delta { get; set; }
+    }
+
+    private sealed class WirePowerDelta
+    {
+        [JsonPropertyName("creatureId")] public int CreatureId { get; set; }
+        [JsonPropertyName("category")] public string Category { get; set; } = "POWER";
+        [JsonPropertyName("entry")] public string Entry { get; set; } = "";
+        [JsonPropertyName("delta")] public int Delta { get; set; }
+    }
+
+    private sealed class WireOpaqueDelta
+    {
+        [JsonPropertyName("label")] public string Label { get; set; } = "opaque";
+        [JsonPropertyName("hpDeltas")] public List<WireIdDelta> HpDeltas { get; set; } = new();
+        [JsonPropertyName("blockDeltas")] public List<WireIdDelta> BlockDeltas { get; set; } = new();
+        [JsonPropertyName("powerDeltas")] public List<WirePowerDelta> PowerDeltas { get; set; } = new();
+        [JsonPropertyName("energyDeltas")] public List<WireIdDelta> EnergyDeltas { get; set; } = new();
+        [JsonPropertyName("starsDeltas")] public List<WireIdDelta> StarsDeltas { get; set; } = new();
+    }
+
+    private sealed class WireTimelineEvent
+    {
+        [JsonPropertyName("seqIdx")] public int SeqIdx { get; set; }
+        [JsonPropertyName("actIndex")] public int ActIndex { get; set; }
+        [JsonPropertyName("floor")] public int Floor { get; set; } = 1;
+        [JsonPropertyName("roundNumber")] public int RoundNumber { get; set; } = 1;
+        [JsonPropertyName("actorPlayerId")] public int ActorPlayerId { get; set; } = 1;
+        [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+        [JsonPropertyName("combat")] public WireCombatReplayEvent? Combat { get; set; }
+        [JsonPropertyName("pauseActionId")] public int? PauseActionId { get; set; }
+        [JsonPropertyName("cancelPlayCardActions")] public bool CancelPlayCardActions { get; set; }
+        [JsonPropertyName("runSync")] public WireOutOfCombatSyncEvent? RunSync { get; set; }
+        [JsonPropertyName("opaque")] public WireOpaqueDelta? Opaque { get; set; }
+    }
+
+    private sealed class WireChecksumEntry
+    {
+        [JsonPropertyName("eventIndex")] public int EventIndex { get; set; }
+        [JsonPropertyName("checksum")] public string Checksum { get; set; } = "";
+    }
+
+    private sealed class WireTraceBundle
+    {
+        [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; } = 1;
+        [JsonPropertyName("viewerPlayerId")] public int ViewerPlayerId { get; set; } = 1;
+        [JsonPropertyName("keyframeStride")] public int KeyframeStride { get; set; } = 2;
+        [JsonPropertyName("initialState")] public WireInitialState InitialState { get; set; } = new();
+        [JsonPropertyName("events")] public List<WireTimelineEvent> Events { get; set; } = new();
+        [JsonPropertyName("expectedChecksums")] public List<WireChecksumEntry> ExpectedChecksums { get; set; } = new();
+    }
+
+    private static TCard DecodeWireCard(WireCard w) => new()
+    {
+        InstId = w.InstanceId,
+        Entry = w.ModelEntry,
+        CardType = w.CardType,
+        Cost = w.CostsX ? 0 : w.BaseCost,
+        UpgradeLevel = w.UpgradeLevel,
+        BaseDamage = w.BaseDamage,
+        BaseBlock = w.BaseBlock,
+        GainsBlock = w.GainsBlock
+    };
+
+    private static TSimState DecodeWireInitialState(WireInitialState w)
+    {
+        ulong runSeed = ulong.TryParse(w.Run.RunSeed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rs) ? rs : 0uL;
+        var st = new TSimState
+        {
+            RunSeed = runSeed,
+            ActIndex = w.Run.CurrentActIndex,
+            Gold = w.Run.Gold,
+            TotalFloors = w.Run.TotalFloors,
+            NextActionId = w.NextActionId,
+            NextHookId = w.NextHookId,
+            IsInCombat = w.IsInCombat,
+            CanceledCount = w.CanceledCount,
+            NextChecksumId = w.NextChecksumId,
+            HasCombat = w.Combat != null
+        };
+        if (w.Combat != null)
+        {
+            var c = w.Combat;
+            st.CombatId = c.CombatId;
+            st.RoundNumber = c.RoundNumber;
+            st.Side = c.CurrentSide == "enemy" ? 2 : (c.CurrentSide == "none" ? 0 : 1);
+            st.IsInProgress = c.IsInProgress;
+            st.IsEnding = c.IsEnding;
+            st.NextInstanceId = c.NextInstanceId;
+            if (string.IsNullOrEmpty(c.Rng.S0) && string.IsNullOrEmpty(c.Rng.S1) && !string.IsNullOrEmpty(c.Rng.Seed))
+            {
+                ulong rSeed = ulong.Parse(c.Rng.Seed, CultureInfo.InvariantCulture);
+                var tmp = new MegaRandomOracle(rSeed);
+                st.Rng = RngOracle.FromState(c.Rng.Counter, tmp.S0, tmp.S1, tmp.S2, tmp.S3);
+            }
+            else
+            {
+                ulong s0 = ulong.Parse(c.Rng.S0, CultureInfo.InvariantCulture);
+                ulong s1 = ulong.Parse(c.Rng.S1, CultureInfo.InvariantCulture);
+                ulong s2 = ulong.Parse(c.Rng.S2, CultureInfo.InvariantCulture);
+                ulong s3 = ulong.Parse(c.Rng.S3, CultureInfo.InvariantCulture);
+                st.Rng = RngOracle.FromState(c.Rng.Counter, s0, s1, s2, s3);
+            }
+            foreach (var cr in c.Allies.Concat(c.Enemies))
+            {
+                st.Creatures.Add(new TCreature
+                {
+                    Id = cr.Id,
+                    Entry = cr.ModelEntry,
+                    Side = cr.Side == "enemy" ? 2 : (cr.Side == "none" ? 0 : 1),
+                    Hp = cr.CurrentHp,
+                    MaxHp = cr.MaxHp,
+                    Block = cr.Block,
+                    MoveId = cr.MonsterMoveId ?? "",
+                    StateLog = new List<string>(cr.MonsterStateLog),
+                    Powers = cr.Powers.Select(pw => new TPower
+                    {
+                        InstId = pw.InstanceId,
+                        Entry = pw.ModelEntry,
+                        IsDebuff = pw.PowerType == "debuff",
+                        AllowNeg = pw.AllowNegative,
+                        Amt = pw.Amount
+                    }).ToList()
+                });
+            }
+            foreach (var pl in c.Players)
+            {
+                st.Players.Add(new TPlayer
+                {
+                    Pid = pl.PlayerId,
+                    Cid = pl.CreatureId,
+                    Energy = pl.Energy,
+                    BaseMaxEnergy = pl.BaseMaxEnergy,
+                    Stars = pl.Stars,
+                    TurnNumber = pl.TurnNumber,
+                    Relics = pl.Relics.Select(r => r.ModelEntry).ToList(),
+                    Potions = pl.Potions.Select(pt => pt.ModelEntry).ToList(),
+                    Hand = pl.Hand.Select(DecodeWireCard).ToList(),
+                    Draw = pl.Draw.Select(DecodeWireCard).ToList(),
+                    Discard = pl.Discard.Select(DecodeWireCard).ToList(),
+                    Exhaust = pl.Exhaust.Select(DecodeWireCard).ToList()
+                });
+            }
+        }
+        return st;
+    }
+
+    private static int ClampIntDelta(int cur, int delta, int maxBound)
+    {
+        long raw = (long)cur + delta;
+        return (int)Math.Min((long)maxBound, Math.Max(0L, raw));
+    }
+
+    private static void WireApplyPower(TSimState st, int targetCid, string entry, bool isDebuff, bool allowNeg, int amt)
+    {
+        if (st.IsEnding || amt == 0) return;
+        var t = st.FindC(targetCid);
+        if (t == null) return;
+        var ex = t.Powers.FirstOrDefault(p => p.Entry == entry);
+        if (ex != null)
+        {
+            if (isDebuff && entry != "ARTIFACT_POWER" && t.HasPower("ARTIFACT_POWER"))
+            {
+                var art = t.Powers.First(p => p.Entry == "ARTIFACT_POWER");
+                art.Amt--;
+                if (art.Amt <= 0) t.Powers.Remove(art);
+                return;
+            }
+            ex.Amt = Math.Clamp(ex.Amt + amt, -StatCap, StatCap);
+            bool rem = allowNeg ? ex.Amt == 0 : ex.Amt <= 0;
+            if (rem) t.Powers.Remove(ex);
+        }
+        else
+        {
+            st.NextInstanceId++;
+            int instId = st.NextInstanceId - 1;
+            if (isDebuff && entry != "ARTIFACT_POWER" && t.HasPower("ARTIFACT_POWER"))
+            {
+                var art = t.Powers.First(p => p.Entry == "ARTIFACT_POWER");
+                art.Amt--;
+                if (art.Amt <= 0) t.Powers.Remove(art);
+                return;
+            }
+            int clamped = Math.Clamp(amt, -StatCap, StatCap);
+            bool rem = allowNeg ? clamped == 0 : clamped <= 0;
+            if (!rem) t.Powers.Add(new TPower { InstId = instId, Entry = entry, IsDebuff = isDebuff, AllowNeg = allowNeg, Amt = clamped });
+        }
+    }
+
+    private static void WireGainBlock(TSimState st, int targetCid, decimal baseAmt, ValuePropFlags props)
+    {
+        if (st.IsEnding) return;
+        var t = st.FindC(targetCid);
+        if (t == null || t.Hp <= 0) return;
+        decimal num = baseAmt;
+        if (props.IsPoweredBlock())
+        {
+            num += t.GetPowerAmt("DEXTERITY_POWER");
+            if (t.HasPower("FRAIL_POWER")) num *= 0.75m;
+        }
+        num = Math.Max(0m, num);
+        int gain = Math.Max(0, (int)decimal.Truncate(num));
+        t.Block = Math.Min(StatCap, t.Block + gain);
+    }
+
+    private static void WireDrawCards(TSimState st, TPlayer p, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            if (p.Hand.Count >= 10) break;
+            if (p.Draw.Count == 0 && p.Discard.Count > 0)
+            {
+                p.Draw = RngOracle.UnstableShuffleGeneric(p.Discard, st.Rng);
+                p.Discard.Clear();
+            }
+            if (p.Draw.Count == 0) break;
+            var top = p.Draw[0];
+            p.Draw.RemoveAt(0);
+            p.Hand.Add(top);
+        }
+    }
+
+    private static void ReplayWireEvent(TSimState st, WireTimelineEvent ev)
+    {
+        if (ev.Kind == "combat" && ev.Combat != null)
+        {
+            var ce = ev.Combat;
+            if (ce.EventType == "gameAction" && ce.Payload != null)
+            {
+                int pid = ce.PlayerId ?? ev.ActorPlayerId;
+                var pl = ce.Payload;
+                st.NextActionId++;
+                if (pl.Type == "playCard" && pl.CardId.HasValue)
+                {
+                    var p = st.FindP(pid);
+                    var card = p?.Hand.FirstOrDefault(c => c.InstId == pl.CardId.Value);
+                    if (p != null && card != null && p.Energy >= card.Cost)
+                    {
+                        p.Energy -= card.Cost;
+                        p.Hand.Remove(card);
+                        bool upg = card.UpgradeLevel > 0;
+                        decimal DmgOr(int d) => card.BaseDamage == 0 ? (decimal)d : (decimal)card.BaseDamage;
+                        decimal BlkOr(int b) => card.BaseBlock == 0 ? (decimal)b : (decimal)card.BaseBlock;
+                        switch (card.Entry)
+                        {
+                            case "STRIKE_IRONCLAD": case "STRIKE_SILENT": case "STRIKE_DEFECT": case "STRIKE_NECROBINDER": case "STRIKE_REGENT":
+                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 9 : 6), ValuePropFlags.Move);
+                                break;
+                            case "DEFEND_IRONCLAD": case "DEFEND_SILENT": case "DEFEND_DEFECT": case "DEFEND_NECROBINDER": case "DEFEND_REGENT":
+                                WireGainBlock(st, p.Cid, BlkOr(upg ? 8 : 5), ValuePropFlags.Move);
+                                break;
+                            case "BASH":
+                                if (pl.TargetId.HasValue)
+                                {
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 10 : 8), ValuePropFlags.Move);
+                                    WireApplyPower(st, pl.TargetId.Value, "VULNERABLE_POWER", true, false, upg ? 3 : 2);
+                                }
+                                break;
+                            case "TWIN_STRIKE":
+                                if (pl.TargetId.HasValue)
+                                {
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 7 : 5), ValuePropFlags.Move);
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 7 : 5), ValuePropFlags.Move);
+                                }
+                                break;
+                            case "POMMEL_STRIKE":
+                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 10 : 9), ValuePropFlags.Move);
+                                WireDrawCards(st, p, upg ? 2 : 1);
+                                break;
+                            case "IRON_WAVE":
+                                WireGainBlock(st, p.Cid, BlkOr(upg ? 7 : 5), ValuePropFlags.Move);
+                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 7 : 5), ValuePropFlags.Move);
+                                break;
+                            case "CLEAVE":
+                                foreach (var en in st.Creatures.Where(x => x.Side == 2 && x.Hp > 0))
+                                    TApplyDamageHit(st, p.Cid, en.Id, DmgOr(upg ? 11 : 8), ValuePropFlags.Move);
+                                break;
+                            case "CLOTHESLINE":
+                                if (pl.TargetId.HasValue)
+                                {
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 14 : 12), ValuePropFlags.Move);
+                                    WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, upg ? 3 : 2);
+                                }
+                                break;
+                            case "UPPERCUT":
+                                if (pl.TargetId.HasValue)
+                                {
+                                    int amt = upg ? 2 : 1;
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(13), ValuePropFlags.Move);
+                                    WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, amt);
+                                    WireApplyPower(st, pl.TargetId.Value, "VULNERABLE_POWER", true, false, amt);
+                                }
+                                break;
+                            case "BLUDGEON":
+                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 42 : 32), ValuePropFlags.Move);
+                                break;
+                            case "INFLAME":
+                                WireApplyPower(st, p.Cid, "STRENGTH_POWER", false, true, upg ? 3 : 2);
+                                break;
+                            case "FOOTWORK":
+                                WireApplyPower(st, p.Cid, "DEXTERITY_POWER", false, true, upg ? 3 : 2);
+                                break;
+                            case "SHRUG_IT_OFF":
+                                WireGainBlock(st, p.Cid, BlkOr(upg ? 11 : 8), ValuePropFlags.Move);
+                                WireDrawCards(st, p, 1);
+                                break;
+                            case "NEUTRALIZE":
+                                if (pl.TargetId.HasValue)
+                                {
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 4 : 3), ValuePropFlags.Move);
+                                    WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, upg ? 2 : 1);
+                                }
+                                break;
+                            default:
+                                if (card.CardType == "attack" && card.BaseDamage > 0 && pl.TargetId.HasValue)
+                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, card.BaseDamage, ValuePropFlags.Move);
+                                else if (card.GainsBlock && card.BaseBlock > 0)
+                                    WireGainBlock(st, p.Cid, card.BaseBlock, ValuePropFlags.Move);
+                                break;
+                        }
+                        if (card.CardType != "power") p.Discard.Add(card);
+                        TCheckWin(st);
+                    }
+                }
+                else if (pl.Type == "usePotion" && pl.SlotIdx.HasValue)
+                {
+                    int slot = pl.SlotIdx.Value;
+                    var p = st.FindP(pid);
+                    if (st.IsInProgress && p != null && slot >= 0 && slot < p.Potions.Count && p.Potions[slot] != null)
+                    {
+                        string potEntry = p.Potions[slot]!;
+                        p.Potions[slot] = null;
+                        switch (potEntry)
+                        {
+                            case "FIRE_POTION":
+                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, 20m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
+                                break;
+                            case "BLOCK_POTION":
+                                WireGainBlock(st, p.Cid, 12m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
+                                break;
+                            case "STRENGTH_POTION":
+                                WireApplyPower(st, p.Cid, "STRENGTH_POWER", false, true, 2);
+                                break;
+                            case "FEAR_POTION":
+                                if (pl.TargetId.HasValue) WireApplyPower(st, pl.TargetId.Value, "VULNERABLE_POWER", true, false, 3);
+                                break;
+                            case "WEAK_POTION":
+                                if (pl.TargetId.HasValue) WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, 3);
+                                break;
+                            case "ENERGY_POTION":
+                                p.Energy = Math.Min(StatCap, p.Energy + 2);
+                                break;
+                            case "SWIFT_POTION":
+                                WireDrawCards(st, p, 3);
+                                break;
+                            case "HEAL_POTION":
+                            {
+                                var selfC = st.FindC(p.Cid);
+                                if (selfC != null && !st.IsEnding && selfC.Hp > 0)
+                                    selfC.Hp = Math.Min(selfC.MaxHp, selfC.Hp + 10);
+                                break;
+                            }
+                        }
+                        TCheckWin(st);
+                    }
+                }
+                else if (pl.Type == "discardPotion" && pl.SlotIdx.HasValue)
+                {
+                    int slot = pl.SlotIdx.Value;
+                    var p = st.FindP(pid);
+                    if (p != null && slot >= 0 && slot < p.Potions.Count) p.Potions[slot] = null;
+                }
+            }
+            else if (ce.EventType == "hookAction")
+            {
+                int hid = ce.HookId ?? st.NextHookId;
+                st.NextHookId = Math.Max(st.NextHookId, hid + 1);
+                st.NextActionId++;
+            }
+        }
+        else if (ev.Kind == "endRoundAndRunEnemies" && st.HasCombat && st.IsInProgress)
+        {
+            foreach (var p in st.Players)
+            {
+                foreach (var c in p.Hand.ToList()) { p.Hand.Remove(c); p.Discard.Add(c); }
+            }
+            st.Side = 2;
+            foreach (var c in st.Creatures.Where(x => x.Side == 2)) c.Block = 0;
+            foreach (var en in st.Creatures.Where(x => x.Side == 2 && x.Hp > 0).ToList())
+            {
+                if (!st.IsInProgress) break;
+                if (en.Entry == "COOP_GUARDIAN")
+                {
+                    string move = en.StateLog.Count == 0 ? (string.IsNullOrEmpty(en.MoveId) ? "SLAM" : en.MoveId) : (en.MoveId == "SLAM" ? "FORTIFY" : "SLAM");
+                    en.MoveId = move;
+                    en.StateLog.Add(move);
+                    if (move == "SLAM")
+                    {
+                        foreach (var ally in st.Creatures.Where(c => c.Side == 1 && c.Hp > 0))
+                            TApplyDamageHit(st, en.Id, ally.Id, 7m, ValuePropFlags.Move);
+                    }
+                    else
+                    {
+                        WireGainBlock(st, en.Id, 8m, ValuePropFlags.Move);
+                        WireApplyPower(st, en.Id, "STRENGTH_POWER", false, true, 1);
+                    }
+                }
+                else if (en.Entry == "CULTIST")
+                {
+                    string move = en.StateLog.Count == 0 ? (string.IsNullOrEmpty(en.MoveId) ? "INCANT" : en.MoveId) : "DARK_STRIKE";
+                    en.MoveId = move;
+                    en.StateLog.Add(move);
+                    if (move == "INCANT")
+                    {
+                        WireApplyPower(st, en.Id, "STRENGTH_POWER", false, true, 3);
+                    }
+                    else
+                    {
+                        var firstAlly = st.Creatures.FirstOrDefault(c => c.Side == 1 && c.Hp > 0);
+                        if (firstAlly != null) TApplyDamageHit(st, en.Id, firstAlly.Id, 6m, ValuePropFlags.Move);
+                    }
+                }
+            }
+            TCheckWin(st);
+            if (st.IsInProgress)
+            {
+                foreach (var p in st.Players) p.TurnNumber++;
+                st.RoundNumber++;
+                st.Side = 1;
+                foreach (var c in st.Creatures.Where(x => x.Side == 1))
+                {
+                    var ow = st.Players.FirstOrDefault(x => x.Cid == c.Id);
+                    if (ow == null || ow.TurnNumber != 1) c.Block = 0;
+                }
+                foreach (var p in st.Players)
+                {
+                    p.Energy = p.BaseMaxEnergy;
+                    WireDrawCards(st, p, 5);
+                }
+            }
+        }
+        else if (ev.Kind == "opaqueStep" && ev.Opaque != null && st.HasCombat)
+        {
+            var d = ev.Opaque;
+            foreach (var h in d.HpDeltas)
+            {
+                var c = st.FindC(h.Id);
+                if (c != null) c.Hp = ClampIntDelta(c.Hp, h.Delta, c.MaxHp);
+            }
+            foreach (var b in d.BlockDeltas)
+            {
+                var c = st.FindC(b.Id);
+                if (c != null) c.Block = ClampIntDelta(c.Block, b.Delta, StatCap);
+            }
+            foreach (var pw in d.PowerDeltas)
+            {
+                var c = st.FindC(pw.CreatureId);
+                if (c == null) continue;
+                var ex = c.Powers.FirstOrDefault(x => x.Entry == pw.Entry);
+                if (ex != null)
+                {
+                    ex.Amt = Math.Clamp(ex.Amt + pw.Delta, -StatCap, StatCap);
+                    bool rem = ex.AllowNeg ? ex.Amt == 0 : ex.Amt <= 0;
+                    if (rem) c.Powers.Remove(ex);
+                }
+                else if (pw.Delta != 0)
+                {
+                    int newId = st.NextInstanceId++;
+                    bool allowNeg = pw.Delta < 0;
+                    int clamped = Math.Clamp(pw.Delta, -StatCap, StatCap);
+                    bool rem = allowNeg ? clamped == 0 : clamped <= 0;
+                    if (!rem) c.Powers.Add(new TPower { InstId = newId, Entry = pw.Entry, IsDebuff = pw.Delta < 0, AllowNeg = allowNeg, Amt = clamped });
+                }
+            }
+            foreach (var eg in d.EnergyDeltas)
+            {
+                var p = st.FindP(eg.Id);
+                if (p != null) p.Energy = ClampIntDelta(p.Energy, eg.Delta, StatCap);
+            }
+            foreach (var sr in d.StarsDeltas)
+            {
+                var p = st.FindP(sr.Id);
+                if (p != null) p.Stars = ClampIntDelta(p.Stars, sr.Delta, StatCap);
+            }
+        }
+        else if (ev.Kind == "runSync" && ev.RunSync != null)
+        {
+            var rs = ev.RunSync;
+            switch (rs.Type)
+            {
+                case "mapMove": st.TotalFloors++; break;
+                case "eventChoice": st.Gold = ClampIntDelta(st.Gold, rs.GoldDelta, StatCap); break;
+                case "merchantBuy": st.Gold -= Math.Min(st.Gold, rs.GoldCost); break;
+                case "rewardPick": st.Gold += rs.GoldGain; break;
+                case "actAdvance": st.ActIndex++; break;
+            }
+        }
+        st.NextChecksumId++;
+    }
+
+    private static (List<(int idx, TSimState state, ulong cs)> kfs, TSimState finalSt) BuildWireArchive(WireTraceBundle b)
+    {
+        var init = DecodeWireInitialState(b.InitialState);
+        int stride = Math.Max(1, b.KeyframeStride);
+        var kfs = new List<(int idx, TSimState state, ulong cs)> { (0, init.Clone(), ComputeTimelineChecksum(init)) };
+        var cur = init.Clone();
+        for (int i = 0; i < b.Events.Count; i++)
+        {
+            ReplayWireEvent(cur, b.Events[i]);
+            int stepIdx = i + 1;
+            if (stepIdx % stride == 0) kfs.Add((stepIdx, cur.Clone(), ComputeTimelineChecksum(cur)));
+        }
+        return (kfs, cur);
+    }
+
+    private static TSimState SeekWire(List<(int idx, TSimState state, ulong cs)> kfs, List<WireTimelineEvent> events, int target)
+    {
+        var kf = kfs.Last(k => k.idx <= target);
+        var s = kf.state.Clone();
+        for (int i = kf.idx; i < Math.Min(target, events.Count); i++) ReplayWireEvent(s, events[i]);
+        return s;
+    }
+
+    private static string EvalTraceJson(string rawJson)
+    {
+        var b = JsonSerializer.Deserialize<WireTraceBundle>(rawJson);
+        if (b == null || b.SchemaVersion != 1) return "ERR:invalid_bundle";
+        var (kfs, cur) = BuildWireArchive(b);
+        int n = b.Events.Count;
+        int mid = n / 2;
+        ulong c0 = ComputeTimelineChecksum(SeekWire(kfs, b.Events, 0));
+        ulong cMid = ComputeTimelineChecksum(SeekWire(kfs, b.Events, mid));
+        ulong cFin = ComputeTimelineChecksum(SeekWire(kfs, b.Events, n));
+
+        // JSON serializer roundtrip check
+        string rtJson = JsonSerializer.Serialize(b);
+        var b2 = JsonSerializer.Deserialize<WireTraceBundle>(rtJson);
+        bool rtOk = b2 != null && b2.SchemaVersion == 1;
+        if (rtOk)
+        {
+            var (kfs2, _) = BuildWireArchive(b2!);
+            rtOk = ComputeTimelineChecksum(SeekWire(kfs2, b2!.Events, 0)) == c0 &&
+                   ComputeTimelineChecksum(SeekWire(kfs2, b2!.Events, mid)) == cMid &&
+                   ComputeTimelineChecksum(SeekWire(kfs2, b2!.Events, n)) == cFin;
+        }
+        int eHp = cur.HasCombat ? (cur.FindC(200)?.Hp ?? 0) : 0;
+        int p1Hp = cur.HasCombat ? (cur.FindC(101)?.Hp ?? 0) : 0;
+        int p2Hp = cur.HasCombat ? (cur.FindC(102)?.Hp ?? 0) : 0;
+        int p1E = cur.HasCombat ? (cur.FindP(1)?.Energy ?? 0) : 0;
+        int p2E = cur.HasCombat ? (cur.FindP(2)?.Energy ?? 0) : 0;
+        return $"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{c0},{cMid},{cFin}|{(rtOk ? 1 : 0)}";
+    }
+
+    private static WireTraceBundle CreateSampleWireBundle()
+    {
+        var r = new MegaRandomOracle(42uL);
+        var b = new WireTraceBundle
+        {
+            SchemaVersion = 1,
+            ViewerPlayerId = 1,
+            KeyframeStride = 2,
+            InitialState = new WireInitialState
+            {
+                Run = new WireRunSnapshot { RunSeed = "42", CurrentActIndex = 0, AscensionLevel = 0, Gold = 99, TotalFloors = 1, CurrentRoom = "monster" },
+                PlayerIds = new List<int> { 1, 2 },
+                IsInCombat = true,
+                Combat = new WireCombatSnapshot
+                {
+                    CombatId = 1,
+                    RoundNumber = 1,
+                    CurrentSide = "player",
+                    IsInProgress = true,
+                    IsEnding = false,
+                    NextInstanceId = 1000,
+                    Rng = new WireRng { Counter = 0, S0 = r.S0.ToString(CultureInfo.InvariantCulture), S1 = r.S1.ToString(CultureInfo.InvariantCulture), S2 = r.S2.ToString(CultureInfo.InvariantCulture), S3 = r.S3.ToString(CultureInfo.InvariantCulture) },
+                    Allies = new List<WireCreature>
+                    {
+                        new() { Id = 101, ModelEntry = "IRONCLAD", ModelCategory = "CHARACTER", Side = "player", PlayerId = 1, CurrentHp = 80, MaxHp = 80 },
+                        new() { Id = 102, ModelEntry = "SILENT", ModelCategory = "CHARACTER", Side = "player", PlayerId = 2, CurrentHp = 70, MaxHp = 70 }
+                    },
+                    Enemies = new List<WireCreature>
+                    {
+                        new() { Id = 200, ModelEntry = "COOP_GUARDIAN", ModelCategory = "MONSTER", Side = "enemy", CurrentHp = 34, MaxHp = 34, MonsterMoveId = "SLAM" }
+                    },
+                    Players = new List<WirePlayer>
+                    {
+                        new()
+                        {
+                            PlayerId = 1, CreatureId = 101, CharacterEntry = "IRONCLAD", Energy = 3, BaseMaxEnergy = 3,
+                            Potions = new List<WirePotion> { new() { ModelEntry = "FIRE_POTION" } },
+                            Hand = new List<WireCard> { new() { InstanceId = 1001, ModelEntry = "BASH", OwnerId = 1, BaseCost = 2 } }
+                        },
+                        new()
+                        {
+                            PlayerId = 2, CreatureId = 102, CharacterEntry = "SILENT", Energy = 3, BaseMaxEnergy = 3,
+                            Hand = new List<WireCard>
+                            {
+                                new() { InstanceId = 2001, ModelEntry = "TWIN_STRIKE", OwnerId = 2, BaseCost = 1 },
+                                new() { InstanceId = 2002, ModelEntry = "STRIKE_IRONCLAD", OwnerId = 2, BaseCost = 1, UpgradeLevel = 1 }
+                            }
+                        }
+                    }
+                }
+            },
+            Events = new List<WireTimelineEvent>
+            {
+                new() { SeqIdx = 0, Floor = 1, RoundNumber = 1, ActorPlayerId = 1, Kind = "combat", Combat = new WireCombatReplayEvent { EventType = "gameAction", PlayerId = 1, Payload = new WireActionPayload { Type = "playCard", CardId = 1001, TargetId = 200 } } },
+                new() { SeqIdx = 1, Floor = 1, RoundNumber = 1, ActorPlayerId = 2, Kind = "combat", Combat = new WireCombatReplayEvent { EventType = "gameAction", PlayerId = 2, Payload = new WireActionPayload { Type = "playCard", CardId = 2001, TargetId = 200 } } },
+                new() { SeqIdx = 2, Floor = 1, RoundNumber = 1, ActorPlayerId = 1, Kind = "opaqueStep", Opaque = new WireOpaqueDelta { Label = "MOD_BONUS", BlockDeltas = new() { new WireIdDelta { Id = 101, Delta = 5 } } } }
+            }
+        };
+        var (kfs, _) = BuildWireArchive(b);
+        b.ExpectedChecksums = kfs.Select(k => new WireChecksumEntry { EventIndex = k.idx, Checksum = k.cs.ToString(CultureInfo.InvariantCulture) }).ToList();
+        return b;
+    }
+
     private static string EvalLine(string line)
     {
         string[] f = line.Split('\t');
@@ -1204,15 +2011,49 @@ public static class Program
             "MOD_SORT"      => EvalModSort(f),
             "QUEUE_SET"     => EvalQueueSet(f),
             "TIMELINE_SEEK" => EvalTimelineSeek(f),
+            "TRACE_JSON"    => EvalTraceJson(f[1]),
             _               => $"UNKNOWN_OP:{f[0]}"
         };
     }
 
     public static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--export-sample-trace")
+        {
+            var bundle = CreateSampleWireBundle();
+            string json = JsonSerializer.Serialize(bundle, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(args[1], json);
+            Console.WriteLine($"Exported C# sample trace bundle to {args[1]}");
+            return 0;
+        }
+        if (args.Length == 2 && args[0] == "--verify-trace")
+        {
+            var b = JsonSerializer.Deserialize<WireTraceBundle>(File.ReadAllText(args[1]));
+            if (b == null || b.SchemaVersion != 1)
+            {
+                Console.Error.WriteLine("VERIFY_FAILED: unsupported or malformed trace JSON");
+                return 1;
+            }
+            var (kfs, _) = BuildWireArchive(b);
+            var mismatches = new List<string>();
+            foreach (var exp in b.ExpectedChecksums)
+            {
+                var stAt = SeekWire(kfs, b.Events, exp.EventIndex);
+                string act = ComputeTimelineChecksum(stAt).ToString(CultureInfo.InvariantCulture);
+                if (act != exp.Checksum)
+                    mismatches.Add($"step#{exp.EventIndex}: expected={exp.Checksum} actual={act}");
+            }
+            if (mismatches.Count > 0)
+            {
+                foreach (var m in mismatches) Console.Error.WriteLine($"MISMATCH {m}");
+                return 1;
+            }
+            Console.WriteLine($"VERIFIED_OK (checked={b.ExpectedChecksums.Count})");
+            return 0;
+        }
         if (args.Length != 2 || args[0] != "--diff")
         {
-            Console.Error.WriteLine("Usage: Sts2Oracle --diff <input.tsv>");
+            Console.Error.WriteLine("Usage: Sts2Oracle --diff <input.tsv> | --export-sample-trace <out.json> | --verify-trace <in.json>");
             return 2;
         }
         foreach (string raw in File.ReadLines(args[1]))

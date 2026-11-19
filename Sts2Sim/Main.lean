@@ -2,11 +2,15 @@
   Executable Simulator & `.NET 9` Differential Test Runner (`lake exe sts2sim`).
   Modes:
     1. Default (`lake exe sts2sim`):
-       Runs all 45 executable assertions (30 Vanilla + 4 ModTemplates + 3 Catalog + 6 Timeline + 2 ReplayAnalyzerExample), exits 0 iff 100% pass.
+       Runs all 49 executable assertions (30 Vanilla + 4 ModTemplates + 3 Catalog + 10 Timeline + 2 ReplayAnalyzerExample), exits 0 iff 100% pass.
     2. Timeline demo (`lake exe sts2sim --timeline-demo`):
        Prints the headless multiplayer timeline reconstruction & downstream analyzer example report.
-    3. Differential oracle mode (`lake exe sts2sim --diff <input.tsv>`):
-       Evaluates all 11 deterministic test families row-by-row for comparison with `DiffTest/Sts2Oracle`.
+    3. Export sample JSON trace (`lake exe sts2sim --export-sample-trace <out.json>`):
+       Serializes a versioned `WireTraceBundle` (`schemaVersion = 1`) for external/C# consumption.
+    4. Inspect / verify external JSON trace (`lake exe sts2sim --inspect <trace.json> [--seek <k>] [--viewer <pid>] [--verify]`):
+       Reconstructs timeline state headlessly, switches viewer, and verifies FNV-1a checksums.
+    5. Differential oracle mode (`lake exe sts2sim --diff <input.tsv>`):
+       Evaluates all 12 deterministic test families row-by-row for comparison with `DiffTest/Sts2Oracle`.
 -/
 import Sts2Model
 
@@ -376,6 +380,39 @@ private def evalTimelineSeek (fields : List String) : String :=
         , ((c.findPlayer 2).bind Player.combatState).map PlayerCombatState.energy |>.getD 0 )
   s!"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{csum}|{if m0 then 1 else 0},{if mm then 1 else 0},{if mf then 1 else 0}"
 
+private def evalTraceJson (fields : List String) : String :=
+  let rawJson := fields[1]?.getD ""
+  match parseTraceJson rawJson >>= fun b => (decodeArchiveBundle vanillaEffectEnv b).map (fun a => (b, a)) with
+  | .error e => s!"ERR:{e}"
+  | .ok (bundle, arch) =>
+      let n := arch.events.length
+      let mid := n / 2
+      let s0 := seek vanillaEffectEnv arch 0
+      let sMid := seek vanillaEffectEnv arch mid
+      let sFin := seek vanillaEffectEnv arch n
+      let c0 := computeStateChecksum s0
+      let cMid := computeStateChecksum sMid
+      let cFin := computeStateChecksum sFin
+      let rtOk :=
+        let rtJson := serializeTraceJson (encodeArchiveBundle arch bundle.keyframeStride) false
+        match parseTraceJson rtJson >>= fun b2 => (decodeArchiveBundle vanillaEffectEnv b2).map (fun a2 => (b2, a2)) with
+        | .error _ => false
+        | .ok (b2, a2) =>
+            let audit := verifyTraceChecksums vanillaEffectEnv a2 b2.expectedChecksums
+            audit.allMatched &&
+            computeStateChecksum (seek vanillaEffectEnv a2 0) == c0 &&
+            computeStateChecksum (seek vanillaEffectEnv a2 mid) == cMid &&
+            computeStateChecksum (seek vanillaEffectEnv a2 n) == cFin
+      let (eHp, p1Hp, p2Hp, p1E, p2E) := match sFin.combat with
+        | none => (0, 0, 0, 0, 0)
+        | some c =>
+            ( (c.findCreature 200).map Creature.currentHp |>.getD 0
+            , (c.findCreature 101).map Creature.currentHp |>.getD 0
+            , (c.findCreature 102).map Creature.currentHp |>.getD 0
+            , ((c.findPlayer 1).bind Player.combatState).map PlayerCombatState.energy |>.getD 0
+            , ((c.findPlayer 2).bind Player.combatState).map PlayerCombatState.energy |>.getD 0 )
+      s!"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{c0},{cMid},{cFin}|{if rtOk then 1 else 0}"
+
 private def evalDiffLine (line : String) : String :=
   let trimmed := line.trimAscii.toString
   if trimmed.isEmpty then ""
@@ -393,7 +430,60 @@ private def evalDiffLine (line : String) : String :=
     | some "MOD_SORT"      => evalModSort fields
     | some "QUEUE_SET"     => evalQueueSet fields
     | some "TIMELINE_SEEK" => evalTimelineSeek fields
+    | some "TRACE_JSON"    => evalTraceJson fields
     | _                    => s!"UNKNOWN_OP:{fields[0]?.getD ""}"
+
+private structure InspectOpts where
+  seekStep : Option Nat := none
+  viewerId : Option PlayerId := none
+  doVerify : Bool := false
+
+private def parseInspectOpts (args : List String) (acc : InspectOpts := {}) : Except String InspectOpts :=
+  match args with
+  | [] => .ok acc
+  | "--verify" :: rest => parseInspectOpts rest { acc with doVerify := true }
+  | "--seek" :: kStr :: rest =>
+      match kStr.toNat? with
+      | some k => parseInspectOpts rest { acc with seekStep := some k }
+      | none   => .error s!"Invalid --seek step: {kStr}"
+  | "--viewer" :: vStr :: rest =>
+      match vStr.toNat? with
+      | some v => parseInspectOpts rest { acc with viewerId := some v }
+      | none   => .error s!"Invalid --viewer playerId: {vStr}"
+  | flag :: _ => .error s!"Unknown --inspect option: {flag}"
+
+private def runInspectCommand (tracePath : String) (optArgs : List String) : IO UInt32 := do
+  match parseInspectOpts optArgs with
+  | .error e =>
+      IO.eprintln s!"Error: {e}"
+      return 2
+  | .ok opts =>
+      let raw ← IO.FS.readFile tracePath
+      match parseTraceJson raw with
+      | .error e =>
+          IO.eprintln s!"Trace JSON parse error: {e}"
+          return 1
+      | .ok bundle =>
+          match decodeArchiveBundle vanillaEffectEnv bundle with
+          | .error e =>
+              IO.eprintln s!"Trace bundle decode error: {e}"
+              return 1
+          | .ok baseArch =>
+              let arch := match opts.viewerId with
+                | some v => switchViewer baseArch v
+                | none   => baseArch
+              let mut exitCode : UInt32 := 0
+              if opts.doVerify then
+                let audit := verifyTraceChecksums vanillaEffectEnv arch bundle.expectedChecksums
+                IO.println s!"ChecksumsVerified={audit.allMatched} (checked={audit.totalChecked}, mismatches={audit.mismatches.length})"
+                if !audit.allMatched then
+                  for m in audit.mismatches do
+                    IO.eprintln s!"  Checksum mismatch at step #{m.eventIndex}: expected={m.expected}, actual={m.actual}"
+                  exitCode := 1
+              match opts.seekStep with
+              | some k => IO.println (inspectArchiveStep vanillaEffectEnv arch k)
+              | none   => IO.println (formatTimelineSummary vanillaEffectEnv arch)
+              return exitCode
 
 private def runRegressionSuite : IO UInt32 := do
   let catalogTests : List (String × Bool) :=
@@ -426,5 +516,11 @@ def main (args : List String) : IO UInt32 := do
   | ["--timeline-demo"] =>
       IO.println runLateVulnerableDemo
       return 0
+  | ["--export-sample-trace", outPath] =>
+      IO.FS.writeFile outPath (serializeTraceJson sampleTraceBundle true)
+      IO.println s!"Exported sample trace bundle (schemaVersion={traceSchemaVersion}) to {outPath}"
+      return 0
+  | "--inspect" :: tracePath :: rest =>
+      runInspectCommand tracePath rest
   | _ =>
       runRegressionSuite

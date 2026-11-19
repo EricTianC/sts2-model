@@ -2,7 +2,7 @@
 """
 Cross-language `.NET 9` <-> Lean 4 differential tester for Slay the Spire 2 logic model.
 
-Generates 790 randomized and adversarial edge-case test vectors across 11 test families:
+Generates 850 randomized and adversarial edge-case test vectors across 12 test families:
   1. RNG_SEQ       (SplitMix64 + Xoshiro256** bit-exact stream & IEEE-754 double bits)
   2. RNG_SHUFFLE   (UnstableShuffle Fisher-Yates child-RNG permutation)
   3. DMG_PIPE      (Hook.ModifyDamageInternal: Strength, Weak, Vulnerable, PaperPhrog, LateMul, Cap)
@@ -14,11 +14,13 @@ Generates 790 randomized and adversarial edge-case test vectors across 11 test f
   9. MOD_SORT      (ModHelper ordinal subscriber registration sort & deduplication)
  10. QUEUE_SET     (Multiplayer ActionQueueSet concurrent queues, pause/choice/resume/cancel)
  11. TIMELINE_SEEK (Multi-player combat replay, FNV-1a 64-bit state checksum, & keyframe seek)
+ 12. TRACE_JSON    (Versioned external trace JSON codec, 64-bit string seeds/checksums, & interop)
 
 Run via: `uv run python scripts/run_diff_test.py`
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import random
@@ -239,6 +241,207 @@ def generate_vectors(seed: int = 20260401) -> list[str]:
         seq = [rng.choice(act_pool) for _ in range(n_acts)]
         rows.append(f"TIMELINE_SEEK\t{seed}\t{ehp}\t{stride}\t{';'.join(seq)}")
 
+    # 12. TRACE_JSON (External Trace JSON Wire Protocol interop, 64-bit seeds, mixed events) - 60 vectors
+    def mk_wire_card(inst_id: int, entry: str, owner_id: int, cost: int, upg: int = 0) -> dict:
+        ctype = "power" if entry in ("INFLAME", "FOOTWORK") else ("skill" if entry in ("DEFEND_IRONCLAD", "SHRUG_IT_OFF") else "attack")
+        return {
+            "instanceId": inst_id,
+            "modelEntry": entry,
+            "ownerId": owner_id,
+            "cardType": ctype,
+            "rarity": "common",
+            "targetType": "self" if ctype in ("power", "skill") else "anyEnemy",
+            "baseCost": cost,
+            "upgradeLevel": upg,
+            "gainsBlock": entry in ("DEFEND_IRONCLAD", "SHRUG_IT_OFF", "IRON_WAVE"),
+        }
+
+    def mk_wire_bundle(
+        run_seed: int,
+        rng_seed: int,
+        enemy_entry: str,
+        enemy_hp: int,
+        enemy_blk: int,
+        enemy_pows: list[dict],
+        p1_potions: list[str | None],
+        events: list[dict],
+        stride: int = 2,
+        include_combat: bool = True,
+        gold: int = 99,
+    ) -> dict:
+        init_state: dict = {
+            "run": {
+                "runSeed": str(run_seed),
+                "currentActIndex": 0,
+                "ascensionLevel": 5,
+                "gold": gold,
+                "totalFloors": 1,
+                "currentRoom": "monster" if include_combat else "shop",
+            },
+            "playerIds": [1, 2],
+            "nextActionId": 0,
+            "nextHookId": 0,
+            "nextChecksumId": 0,
+            "isInCombat": include_combat,
+        }
+        if include_combat:
+            move_id = "INCANT" if enemy_entry == "CULTIST" else "SLAM"
+            init_state["combat"] = {
+                "combatId": 1,
+                "roundNumber": 1,
+                "currentSide": "player",
+                "isInProgress": True,
+                "isEnding": False,
+                "nextInstanceId": 500,
+                "rng": {"counter": 0, "seed": str(rng_seed)},
+                "allies": [
+                    {"id": 101, "modelEntry": "IRONCLAD", "modelCategory": "CHARACTER", "side": "player", "playerId": 1, "currentHp": 80, "maxHp": 80, "block": 0, "powers": []},
+                    {"id": 102, "modelEntry": "SILENT", "modelCategory": "CHARACTER", "side": "player", "playerId": 2, "currentHp": 70, "maxHp": 70, "block": 0, "powers": []},
+                ],
+                "enemies": [
+                    {"id": 200, "modelEntry": enemy_entry, "modelCategory": "MONSTER", "side": "enemy", "currentHp": enemy_hp, "maxHp": enemy_hp, "block": enemy_blk, "powers": enemy_pows, "monsterMoveId": move_id}
+                ],
+                "players": [
+                    {
+                        "playerId": 1, "creatureId": 101, "characterEntry": "IRONCLAD", "energy": 5, "baseMaxEnergy": 3, "stars": 0, "turnNumber": 1,
+                        "hand": [
+                            mk_wire_card(1001, "BASH", 1, 2),
+                            mk_wire_card(1002, "POMMEL_STRIKE", 1, 1),
+                            mk_wire_card(1003, "INFLAME", 1, 1),
+                            mk_wire_card(1004, "IRON_WAVE", 1, 1),
+                        ],
+                        "draw": [mk_wire_card(1010, "STRIKE_IRONCLAD", 1, 1), mk_wire_card(1011, "CLEAVE", 1, 1)],
+                        "discard": [mk_wire_card(1020, "TWIN_STRIKE", 1, 1)],
+                        "potions": [{"modelEntry": p} for p in p1_potions],
+                    },
+                    {
+                        "playerId": 2, "creatureId": 102, "characterEntry": "SILENT", "energy": 5, "baseMaxEnergy": 3, "stars": 0, "turnNumber": 1,
+                        "hand": [
+                            mk_wire_card(2001, "TWIN_STRIKE", 2, 1),
+                            mk_wire_card(2002, "SHRUG_IT_OFF", 2, 1),
+                            mk_wire_card(2003, "UPPERCUT", 2, 2),
+                            mk_wire_card(2004, "STRIKE_IRONCLAD", 2, 1, 1),
+                        ],
+                        "draw": [mk_wire_card(2010, "NEUTRALIZE", 2, 0)],
+                        "discard": [mk_wire_card(2020, "DEFEND_IRONCLAD", 2, 1)],
+                        "potions": [],
+                    },
+                ],
+            }
+        return {
+            "schemaVersion": 1,
+            "viewerPlayerId": 1,
+            "keyframeStride": stride,
+            "initialState": init_state,
+            "events": events,
+            "expectedChecksums": [],
+        }
+
+    # Edge 1: Co-op Guardian multi-round with potions, powers, draw, opaqueStep
+    tj_edge_1 = mk_wire_bundle(
+        run_seed=(1 << 63) + 777,
+        rng_seed=42,
+        enemy_entry="COOP_GUARDIAN",
+        enemy_hp=60,
+        enemy_blk=5,
+        enemy_pows=[{"instanceId": 10, "modelEntry": "ARTIFACT_POWER", "powerType": "buff", "stackType": "counter", "allowNegative": False, "amount": 1}],
+        p1_potions=["STRENGTH_POTION", "FIRE_POTION"],
+        events=[
+            {"seqIdx": 0, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "usePotion", "slotIdx": 0, "targetId": None}}},
+            {"seqIdx": 1, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "playCard", "cardId": 1001, "targetId": 200}}},
+            {"seqIdx": 2, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2001, "targetId": 200}}},
+            {"seqIdx": 3, "actorPlayerId": 1, "kind": "endRoundAndRunEnemies"},
+            {"seqIdx": 4, "actorPlayerId": 1, "kind": "opaqueStep", "opaque": {"label": "RELIC", "hpDeltas": [{"id": 200, "delta": -4}], "powerDeltas": [{"creatureId": 200, "category": "POWER", "entry": "VULNERABLE_POWER", "delta": 2}], "energyDeltas": [{"id": 1, "delta": 1}]}},
+        ],
+        stride=2,
+    )
+    # Edge 2: Non-combat RunSync chain + max uint64 runSeed (> 2^53)
+    tj_edge_2 = mk_wire_bundle(
+        run_seed=(1 << 64) - 1,
+        rng_seed=1,
+        enemy_entry="COOP_GUARDIAN",
+        enemy_hp=10,
+        enemy_blk=0,
+        enemy_pows=[],
+        p1_potions=[],
+        include_combat=False,
+        gold=150,
+        events=[
+            {"seqIdx": 0, "actorPlayerId": 1, "kind": "runSync", "runSync": {"type": "mapMove", "row": 1, "col": 2, "pointType": "monster", "roomType": "monster"}},
+            {"seqIdx": 1, "actorPlayerId": 1, "kind": "runSync", "runSync": {"type": "eventChoice", "optionKey": "TAKE_GOLD", "goldDelta": 75, "hpDelta": -5}},
+            {"seqIdx": 2, "actorPlayerId": 1, "kind": "runSync", "runSync": {"type": "merchantBuy", "cardModel": {"category": "CARD", "entry": "BASH"}, "goldCost": 60}},
+            {"seqIdx": 3, "actorPlayerId": 1, "kind": "runSync", "runSync": {"type": "rewardPick", "goldGain": 25}},
+            {"seqIdx": 4, "actorPlayerId": 1, "kind": "runSync", "runSync": {"type": "actAdvance"}},
+        ],
+        stride=1,
+    )
+    # Edge 3: Cultist AI multi-round + Shrug/Pommel draw + Swift Potion
+    tj_edge_3 = mk_wire_bundle(
+        run_seed=98765432101234567,
+        rng_seed=999,
+        enemy_entry="CULTIST",
+        enemy_hp=52,
+        enemy_blk=0,
+        enemy_pows=[],
+        p1_potions=["SWIFT_POTION", "HEAL_POTION"],
+        events=[
+            {"seqIdx": 0, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "usePotion", "slotIdx": 0, "targetId": None}}},
+            {"seqIdx": 1, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2002, "targetId": None}}},
+            {"seqIdx": 2, "actorPlayerId": 1, "kind": "endRoundAndRunEnemies"},
+            {"seqIdx": 3, "actorPlayerId": 1, "kind": "endRoundAndRunEnemies"},
+        ],
+        stride=2,
+    )
+    # Edge 4: Artifact + Power card removal + Hook action
+    tj_edge_4 = mk_wire_bundle(
+        run_seed=1234567890123456789,
+        rng_seed=777,
+        enemy_entry="COOP_GUARDIAN",
+        enemy_hp=40,
+        enemy_blk=10,
+        enemy_pows=[{"instanceId": 20, "modelEntry": "ARTIFACT_POWER", "powerType": "buff", "stackType": "counter", "allowNegative": False, "amount": 2}],
+        p1_potions=["FEAR_POTION"],
+        events=[
+            {"seqIdx": 0, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "hookAction", "playerId": 1, "hookId": 5}},
+            {"seqIdx": 1, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "playCard", "cardId": 1003, "targetId": None}}},
+            {"seqIdx": 2, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "usePotion", "slotIdx": 0, "targetId": 200}}},
+            {"seqIdx": 3, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2003, "targetId": 200}}},
+        ],
+        stride=1,
+    )
+    for b in (tj_edge_1, tj_edge_2, tj_edge_3, tj_edge_4):
+        rows.append("TRACE_JSON\t" + json.dumps(b, separators=(",", ":")))
+
+    wire_event_templates = [
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "playCard", "cardId": 1001, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "playCard", "cardId": 1002, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "playCard", "cardId": 1003, "targetId": None}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "playCard", "cardId": 1004, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2001, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2002, "targetId": None}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2003, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 2, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 2, "payload": {"type": "playCard", "cardId": 2004, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "usePotion", "slotIdx": 0, "targetId": 200}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "combat", "combat": {"eventType": "gameAction", "playerId": 1, "payload": {"type": "discardPotion", "slotIdx": 1}}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "endRoundAndRunEnemies"},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "opaqueStep", "opaque": {"label": "RAND", "hpDeltas": [{"id": 200, "delta": -3}], "blockDeltas": [{"id": 101, "delta": 4}], "energyDeltas": [{"id": 1, "delta": 1}], "starsDeltas": [{"id": 2, "delta": 2}]}},
+        lambda idx: {"seqIdx": idx, "actorPlayerId": 1, "kind": "runSync", "runSync": {"type": "rewardPick", "goldGain": 15}},
+    ]
+    for _ in range(56):
+        rseed = rng.randrange(1 << 54, 1 << 64)  # Always test 64-bit string precision (> 2^53)
+        cseed = rng.randrange(0, 1 << 64)
+        enemy = rng.choice(["COOP_GUARDIAN", "CULTIST"])
+        ehp = rng.choice([24, 34, 55, 80, 110])
+        eblk = rng.choice([0, 0, 5, 10])
+        art_amt = rng.choice([0, 0, 1, 2])
+        pows = [{"instanceId": 15, "modelEntry": "ARTIFACT_POWER", "powerType": "buff", "stackType": "counter", "allowNegative": False, "amount": art_amt}] if art_amt > 0 else []
+        pots = rng.sample(["FIRE_POTION", "BLOCK_POTION", "STRENGTH_POTION", "ENERGY_POTION", "FEAR_POTION"], k=2)
+        stride = rng.randint(1, 4)
+        n_ev = rng.randint(1, 8)
+        evs = [rng.choice(wire_event_templates)(idx) for idx in range(n_ev)]
+        b = mk_wire_bundle(rseed, cseed, enemy, ehp, eblk, pows, pots, evs, stride=stride)
+        rows.append("TRACE_JSON\t" + json.dumps(b, separators=(",", ":")))
+
     return rows
 
 
@@ -282,7 +485,26 @@ def main() -> int:
     for fam, cnt in sorted(family_counts.items()):
         print(f"  {fam:14s}: {cnt} vectors")
     print(f"Total vectors: {len(vectors)}, mismatches: {mismatches}")
-    return 0 if mismatches == 0 else 1
+    if mismatches != 0:
+        return 1
+
+    # Bi-directional C# <-> Lean JSON trace file handoff verification
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cs_trace = os.path.join(tmpdir, "cs_export.json")
+        lean_trace = os.path.join(tmpdir, "lean_export.json")
+        subprocess.run(["dotnet", str(CS_DLL), "--export-sample-trace", cs_trace], capture_output=True, text=True, check=True)
+        lean_inspect = subprocess.run([str(LEAN_BIN), "--inspect", cs_trace, "--verify", "--viewer", "2"], capture_output=True, text=True, check=True)
+        if "ChecksumsVerified=true" not in lean_inspect.stdout:
+            print(f"Bi-directional C# -> Lean verification failed:\n{lean_inspect.stdout}\n{lean_inspect.stderr}")
+            return 1
+        subprocess.run([str(LEAN_BIN), "--export-sample-trace", lean_trace], capture_output=True, text=True, check=True)
+        cs_verify = subprocess.run(["dotnet", str(CS_DLL), "--verify-trace", lean_trace], capture_output=True, text=True, check=True)
+        if "VERIFIED_OK" not in cs_verify.stdout:
+            print(f"Bi-directional Lean -> C# verification failed:\n{cs_verify.stdout}\n{cs_verify.stderr}")
+            return 1
+
+    print("Bi-directional C# <-> Lean JSON trace handoff: PASS")
+    return 0
 
 
 if __name__ == "__main__":

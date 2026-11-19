@@ -170,12 +170,61 @@ def tl_06_opaque_state_delta_fallback : Bool :=
       let p2Stars := ((cs.findPlayer 2).bind (·.combatState)).map (·.stars) |>.getD 0
       eHp == 29 && p1Blk == 4 && p1Eng == 4 && p2Stars == 3
 
+def sampleTraceArchive : TimelineArchive :=
+  buildArchive vanillaEffectEnv sampleCoopInit potionAndRoundEvents 2 1
+
+def sampleTraceBundle : WireTraceBundle :=
+  encodeArchiveBundle sampleTraceArchive 2
+
+def tl_07_fork_timeline_matches_prefix_plus_alt : Bool :=
+  let altEvs : List TimelineEvent :=
+    [ mkSamplePlayEv 0 1 1001 200
+    , mkSamplePlayEv 1 2 2001 200
+    , mkSamplePlayEv 2 2 2002 200 ]
+  let forked := forkTimeline vanillaEffectEnv sampleTraceArchive 0 altEvs
+  let direct := replayEvents vanillaEffectEnv sampleCoopInit altEvs
+  forked == direct && computeStateChecksum forked == computeStateChecksum direct
+
+def tl_08_trace_json_roundtrip_preserves_seek_and_checksums : Bool :=
+  let rawJson := serializeTraceJson sampleTraceBundle false
+  match parseTraceJson rawJson with
+  | .error _ => false
+  | .ok decodedBundle =>
+      match decodeArchiveBundle vanillaEffectEnv decodedBundle with
+      | .error _ => false
+      | .ok decodedArch =>
+          let audit := verifyTraceChecksums vanillaEffectEnv decodedArch decodedBundle.expectedChecksums
+          let indices := List.range (potionAndRoundEvents.length + 1)
+          let matchAll := indices.all fun k =>
+            let s1 := seek vanillaEffectEnv sampleTraceArchive k
+            let s2 := seek vanillaEffectEnv decodedArch k
+            s1 == s2 && computeStateChecksum s1 == computeStateChecksum s2
+          audit.allMatched && matchAll
+
+def tl_09_trace_json_rejects_unsupported_schema_version : Bool :=
+  let badBundle : WireTraceBundle := { sampleTraceBundle with schemaVersion := 99 }
+  match decodeArchiveBundle vanillaEffectEnv badBundle with
+  | .error _ => true
+  | .ok _    => false
+
+def tl_10_verify_trace_checksums_detects_tampering : Bool :=
+  let tampered :=
+    match sampleTraceBundle.expectedChecksums with
+    | [] => []
+    | c :: rest => { c with checksum := "12345" } :: rest
+  let audit := verifyTraceChecksums vanillaEffectEnv sampleTraceArchive tampered
+  !audit.allMatched && audit.mismatches.length == 1
+
 def allTimelineTests : List (String × Bool) :=
   [ ("tl_01_concurrent_queues_player_choice_pause_resume", tl_01_concurrent_queues_player_choice_pause_resume)
   , ("tl_02_early_resume_buffered_before_pause", tl_02_early_resume_buffered_before_pause)
   , ("tl_03_keyframe_seek_matches_full_replay_and_checksum", tl_03_keyframe_seek_matches_full_replay_and_checksum)
   , ("tl_04_viewer_switch_invariance", tl_04_viewer_switch_invariance)
   , ("tl_05_potion_and_monster_ai_turn_cycle", tl_05_potion_and_monster_ai_turn_cycle)
-  , ("tl_06_opaque_state_delta_fallback", tl_06_opaque_state_delta_fallback) ]
+  , ("tl_06_opaque_state_delta_fallback", tl_06_opaque_state_delta_fallback)
+  , ("tl_07_fork_timeline_matches_prefix_plus_alt", tl_07_fork_timeline_matches_prefix_plus_alt)
+  , ("tl_08_trace_json_roundtrip_preserves_seek_and_checksums", tl_08_trace_json_roundtrip_preserves_seek_and_checksums)
+  , ("tl_09_trace_json_rejects_unsupported_schema_version", tl_09_trace_json_rejects_unsupported_schema_version)
+  , ("tl_10_verify_trace_checksums_detects_tampering", tl_10_verify_trace_checksums_detects_tampering) ]
 
 end Sts2Model.Examples
