@@ -28,6 +28,12 @@ import Sts2Model.Combat.MonsterAI
 import Sts2Model.Combat.GameAction
 import Sts2Model.Combat.TurnLoop
 
+import Sts2Model.Multiplayer.ActionQueueSet
+import Sts2Model.Replay.History
+import Sts2Model.Sim.EffectIR
+import Sts2Model.Sim.VanillaEffects
+import Sts2Model.Replay.Timeline
+
 import Sts2Model.Mechanics.Orbs
 import Sts2Model.Mechanics.Necrobinder
 import Sts2Model.Mechanics.Regent
@@ -46,6 +52,7 @@ import Sts2Model.Proofs.TurnMachine
 import Sts2Model.Proofs.Determinism
 import Sts2Model.Proofs.Mechanics
 import Sts2Model.Proofs.MapTopology
+import Sts2Model.Proofs.ReplayTimeline
 
 import Sts2Model.Catalog.Types
 import Sts2Model.Catalog.Cards
@@ -53,8 +60,11 @@ import Sts2Model.Catalog.Relics
 import Sts2Model.Catalog.Powers
 import Sts2Model.Catalog.Verify
 
+-- Downstream Reference Examples (non-core; never imported by core modules)
 import Sts2Model.Examples.VanillaShowcase
 import Sts2Model.Examples.ModTemplates
+import Sts2Model.Examples.TimelineShowcase
+import Sts2Model.Examples.ReplayAnalyzerExample
 
 namespace Sts2Model
 

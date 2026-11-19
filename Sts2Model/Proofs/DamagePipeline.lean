@@ -293,4 +293,25 @@ theorem osty_redirection_conservation (osty owner : Creature) (unblocked : Nat)
   dsimp only
   omega
 
+theorem vulnerable_factor_bounds :
+    Dec.one ≤ Dec.ofScaled 15 1 ∧ Dec.ofScaled 15 1 ≤ Dec.ofScaled 175 2 := by
+  constructor <;> decide
+
+theorem vulnerable_damage_ge_unvulnerable (d : Dec) (hd : Dec.nonneg d) :
+    d ≤ Dec.mul d (Dec.ofScaled 15 1) := by
+  have hMulOne : Dec.eqVal (Dec.mul d Dec.one) d := Dec.mul_one_eqVal d
+  have hLe1 : d ≤ Dec.mul d Dec.one := Dec.le_of_eqVal (Dec.eqVal_symm hMulOne)
+  have hLe2 : Dec.mul d Dec.one ≤ Dec.mul d (Dec.ofScaled 15 1) :=
+    Dec.mul_le_mul_of_nonneg_left vulnerable_factor_bounds.1 hd
+  exact Dec.le_trans hLe1 hLe2
+
+theorem vulnerable_damage_strictly_gt_for_ge_two (n : Nat) (hn : 2 ≤ n) :
+    (Dec.ofNat n).truncate < (Dec.mul (Dec.ofNat n) (Dec.ofScaled 15 1)).truncate := by
+  have hpow0 : Dec.pow10 0 = 1 := by decide
+  have hpow1 : Dec.pow10 1 = 10 := by decide
+  unfold Dec.ofNat Dec.ofScaled Dec.mul Dec.truncate
+  simp only [Nat.zero_add, hpow0, hpow1]
+  rw [Int.tdiv_eq_ediv_of_nonneg (by omega), Int.tdiv_eq_ediv_of_nonneg (by omega)]
+  omega
+
 end Sts2Model.Proofs
