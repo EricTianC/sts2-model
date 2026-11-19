@@ -1,0 +1,8 @@
+reference/
+sts2.zip
+.lake/
+DiffTest/**/bin/
+DiffTest/**/obj/
+__pycache__/
+*.pyc
+.DS_Store

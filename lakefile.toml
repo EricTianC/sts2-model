@@ -1,0 +1,10 @@
+name = "sts2_ideal"
+version = "0.1.0"
+defaultTargets = ["Sts2Model", "sts2sim"]
+
+[[lean_lib]]
+name = "Sts2Model"
+
+[[lean_exe]]
+name = "sts2sim"
+root = "Sts2Sim.Main"
