@@ -12,6 +12,11 @@ internal sealed class MegaRandomOracle
     private const double IncrDouble = 1.1102230246251565E-16;
     private ulong _s0, _s1, _s2, _s3;
 
+    public ulong S0 => _s0;
+    public ulong S1 => _s1;
+    public ulong S2 => _s2;
+    public ulong S3 => _s3;
+
     public MegaRandomOracle(ulong seed)
     {
         _s0 = Splitmix64(ref seed);
@@ -19,6 +24,13 @@ internal sealed class MegaRandomOracle
         _s2 = Splitmix64(ref seed);
         _s3 = Splitmix64(ref seed);
     }
+
+    private MegaRandomOracle(ulong s0, ulong s1, ulong s2, ulong s3)
+    {
+        _s0 = s0; _s1 = s1; _s2 = s2; _s3 = s3;
+    }
+
+    public MegaRandomOracle Clone() => new(_s0, _s1, _s2, _s3);
 
     public static ulong Splitmix64(ref ulong x)
     {
@@ -57,16 +69,21 @@ internal sealed class MegaRandomOracle
 internal sealed class RngOracle
 {
     private readonly MegaRandomOracle _random;
-    public RngOracle(ulong seed) => _random = new MegaRandomOracle(seed);
-    public ulong NextUnsignedLong() => _random.NextULongInner();
-    public int NextInt(int maxExclusive) => _random.Next(maxExclusive);
-    public bool NextBool() => _random.Next(2) == 0;
-    public double NextDouble() => _random.NextDouble();
-    public float NextFloat() => (float)_random.NextDouble();
+    public int Counter { get; private set; }
+    public MegaRandomOracle State => _random;
 
-    public static List<long> UnstableShuffle(List<long> list, RngOracle rng)
+    public RngOracle(ulong seed) { _random = new MegaRandomOracle(seed); Counter = 0; }
+    private RngOracle(MegaRandomOracle state, int counter) { _random = state; Counter = counter; }
+    public RngOracle Clone() => new(_random.Clone(), Counter);
+    public ulong NextUnsignedLong() { Counter++; return _random.NextULongInner(); }
+    public int NextInt(int maxExclusive) => maxExclusive <= 0 ? 0 : Math.Min(_random.Next(maxExclusive), maxExclusive - 1);
+    public bool NextBool() => NextInt(2) == 0;
+    public double NextDouble() { Counter++; return _random.NextDouble(); }
+    public float NextFloat() => (float)NextDouble();
+
+    public static List<T> UnstableShuffleGeneric<T>(List<T> list, RngOracle rng)
     {
-        var copy = new List<long>(list);
+        var copy = new List<T>(list);
         var rng2 = new RngOracle(rng.NextUnsignedLong());
         int num = copy.Count;
         while (num > 1)
@@ -77,6 +94,9 @@ internal sealed class RngOracle
         }
         return copy;
     }
+
+    public static List<long> UnstableShuffle(List<long> list, RngOracle rng) =>
+        UnstableShuffleGeneric(list, rng);
 }
 
 [Flags]
@@ -540,21 +560,651 @@ public static class Program
         return string.Join(",", list);
     }
 
+    // ========================================================================
+    // 10. QUEUE_SET (`ActionQueueSet.cs`)
+    // ========================================================================
+    private enum QActionState { None, WaitingForExecution, Executing, GatheringPlayerChoice, ReadyToResumeExecuting, Finished, Canceled }
+    private enum QActionType { None, Combat, CombatPlayPhaseOnly, NonCombat, Any }
+
+    private sealed class QAction
+    {
+        public int ActionId;
+        public int OwnerId;
+        public QActionType ActionType;
+        public bool IsPlayerDriven;
+        public bool IsPlayCard;
+        public QActionState State;
+    }
+
+    private sealed class PlayerQ
+    {
+        public int OwnerId;
+        public List<QAction> Actions = new();
+        public int? CancellingPlayCardActionId;
+        public bool IsCancellingPlayerDrivenCombatActions;
+        public bool IsCancellingCombatActions = true;
+        public bool IsPaused;
+    }
+
+    private static bool IsQActionEligible(bool isInCombat, bool qPaused, QAction a)
+    {
+        if (a.State == QActionState.Canceled) return false;
+        if (isInCombat && a.ActionType == QActionType.NonCombat) return false;
+        if (!isInCombat && (a.ActionType == QActionType.Combat || a.ActionType == QActionType.CombatPlayPhaseOnly)) return false;
+        if (qPaused && a.ActionType == QActionType.CombatPlayPhaseOnly) return false;
+        if (a.State == QActionState.GatheringPlayerChoice) return false;
+        return a.State == QActionState.WaitingForExecution || a.State == QActionState.ReadyToResumeExecuting;
+    }
+
+    private static string EvalQueueSet(string[] f)
+    {
+        var pids = f[1].Split(',', StringSplitOptions.RemoveEmptyEntries)
+                       .Select(s => int.Parse(s.Trim(), CultureInfo.InvariantCulture))
+                       .ToList();
+        string opsRaw = f.Length > 2 ? f[2] : "";
+        var ops = string.IsNullOrWhiteSpace(opsRaw)
+            ? Array.Empty<string>()
+            : opsRaw.Split(';');
+
+        var queues = pids.Select(pid => new PlayerQ { OwnerId = pid, IsCancellingCombatActions = false }).ToList();
+        var waiting = new List<(int oldId, int newId)>();
+        int nextActionId = 0;
+        bool isInCombat = true;
+        int canceledCount = 0;
+        var picked = new List<int>();
+
+        foreach (string rawOp in ops)
+        {
+            string tok = rawOp.Trim();
+            if (tok.Length == 0) continue;
+            string[] p = tok.Split(',');
+            switch (p[0])
+            {
+                case "ENQ":
+                {
+                    int pid = int.Parse(p[1], CultureInfo.InvariantCulture);
+                    int tc = int.Parse(p[2], CultureInfo.InvariantCulture);
+                    bool pDriven = p[3] == "1";
+                    bool isPlay = p[4] == "1";
+                    var atp = tc switch { 0 => QActionType.None, 1 => QActionType.Combat, 2 => QActionType.CombatPlayPhaseOnly, 3 => QActionType.NonCombat, _ => QActionType.Any };
+                    int assignedId = nextActionId++;
+                    var q = queues.FirstOrDefault(x => x.OwnerId == pid);
+                    if (q != null)
+                    {
+                        bool cancelForChoice = q.CancellingPlayCardActionId.HasValue && isPlay;
+                        bool cancelForEndTurn = q.IsCancellingPlayerDrivenCombatActions && pDriven && atp != QActionType.NonCombat && atp != QActionType.Any;
+                        bool cancelForCombatEnd = q.IsCancellingCombatActions && (atp == QActionType.Combat || atp == QActionType.CombatPlayPhaseOnly);
+                        if (cancelForChoice || cancelForEndTurn || cancelForCombatEnd)
+                        {
+                            canceledCount++;
+                        }
+                        else
+                        {
+                            q.Actions.Add(new QAction
+                            {
+                                ActionId = assignedId,
+                                OwnerId = pid,
+                                ActionType = atp,
+                                IsPlayerDriven = pDriven,
+                                IsPlayCard = isPlay,
+                                State = QActionState.WaitingForExecution
+                            });
+                        }
+                    }
+                    break;
+                }
+                case "PICK":
+                {
+                    QAction? best = null;
+                    foreach (var q in queues)
+                    {
+                        while (q.Actions.Count > 0 && q.Actions[0].State == QActionState.Canceled)
+                            q.Actions.RemoveAt(0);
+                        if (q.Actions.Count == 0) continue;
+                        var hd = q.Actions[0];
+                        if (!IsQActionEligible(isInCombat, q.IsPaused, hd)) continue;
+                        if (best == null || hd.ActionId < best.ActionId) best = hd;
+                    }
+                    picked.Add(best?.ActionId ?? -1);
+                    break;
+                }
+                case "EXEC":
+                {
+                    int aid = int.Parse(p[1], CultureInfo.InvariantCulture);
+                    foreach (var q in queues)
+                    {
+                        if (q.Actions.Count > 0 && q.Actions[0].ActionId == aid)
+                            q.Actions[0].State = QActionState.Executing;
+                    }
+                    break;
+                }
+                case "PAUSE":
+                {
+                    int aid = int.Parse(p[1], CultureInfo.InvariantCulture);
+                    bool cpc = p[2] == "1";
+                    var targetQ = queues.FirstOrDefault(q => q.Actions.Count > 0 && q.Actions[0].ActionId == aid);
+                    if (targetQ != null)
+                    {
+                        (int oldId, int newId)? early = null;
+                        int wIdx = waiting.FindIndex(w => w.oldId == aid);
+                        if (wIdx >= 0)
+                        {
+                            early = waiting[wIdx];
+                            waiting.RemoveAt(wIdx);
+                        }
+                        int? maxId = early?.newId;
+                        var head = targetQ.Actions[0];
+                        head.State = QActionState.GatheringPlayerChoice;
+                        if (cpc)
+                        {
+                            for (int i = 1; i < targetQ.Actions.Count; i++)
+                            {
+                                var a = targetQ.Actions[i];
+                                if (a.IsPlayCard && a.State == QActionState.WaitingForExecution && (!maxId.HasValue || a.ActionId < maxId.Value))
+                                {
+                                    targetQ.Actions.RemoveAt(i);
+                                    canceledCount++;
+                                    i--;
+                                }
+                            }
+                            targetQ.CancellingPlayCardActionId = aid;
+                        }
+                        if (early.HasValue)
+                        {
+                            head.ActionId = early.Value.newId;
+                            head.State = QActionState.ReadyToResumeExecuting;
+                            targetQ.CancellingPlayCardActionId = null;
+                        }
+                    }
+                    break;
+                }
+                case "RESUME":
+                {
+                    int oldId = int.Parse(p[1], CultureInfo.InvariantCulture);
+                    int newId = nextActionId++;
+                    bool found = false;
+                    foreach (var q in queues)
+                    {
+                        bool anyHere = q.Actions.Any(a => a.ActionId == oldId && a.State == QActionState.GatheringPlayerChoice);
+                        if (anyHere)
+                        {
+                            found = true;
+                            q.CancellingPlayCardActionId = null;
+                            foreach (var a in q.Actions)
+                            {
+                                if (a.ActionId == oldId && a.State == QActionState.GatheringPlayerChoice)
+                                {
+                                    a.ActionId = newId;
+                                    a.State = QActionState.ReadyToResumeExecuting;
+                                }
+                            }
+                        }
+                    }
+                    if (!found) waiting.Add((oldId, newId));
+                    break;
+                }
+                case "POP":
+                {
+                    int aid = int.Parse(p[1], CultureInfo.InvariantCulture);
+                    foreach (var q in queues)
+                    {
+                        if (q.Actions.Count > 0 && q.Actions[0].ActionId == aid)
+                        {
+                            q.Actions.RemoveAt(0);
+                            if (q.CancellingPlayCardActionId == aid) q.CancellingPlayCardActionId = null;
+                        }
+                    }
+                    break;
+                }
+                case "CANCELPD":
+                {
+                    foreach (var q in queues)
+                    {
+                        q.IsCancellingPlayerDrivenCombatActions = true;
+                        for (int i = 0; i < q.Actions.Count; i++)
+                        {
+                            var a = q.Actions[i];
+                            if (a.IsPlayerDriven && a.ActionType != QActionType.NonCombat && a.ActionType != QActionType.Any && a.State == QActionState.WaitingForExecution)
+                            {
+                                q.Actions.RemoveAt(i);
+                                canceledCount++;
+                                i--;
+                            }
+                        }
+                    }
+                    break;
+                }
+                case "CEND":
+                {
+                    isInCombat = false;
+                    foreach (var q in queues)
+                    {
+                        for (int i = 0; i < q.Actions.Count; i++)
+                        {
+                            var a = q.Actions[i];
+                            if ((a.ActionType == QActionType.Combat || a.ActionType == QActionType.CombatPlayPhaseOnly) && a.State != QActionState.Executing)
+                            {
+                                q.Actions.RemoveAt(i);
+                                canceledCount++;
+                                i--;
+                            }
+                        }
+                        q.CancellingPlayCardActionId = null;
+                        q.IsCancellingPlayerDrivenCombatActions = false;
+                        q.IsCancellingCombatActions = true;
+                    }
+                    break;
+                }
+                case "CSTART":
+                {
+                    isInCombat = true;
+                    foreach (var q in queues) q.IsCancellingCombatActions = false;
+                    break;
+                }
+                case "PPAUSED":
+                {
+                    bool flg = p[1] == "1";
+                    foreach (var q in queues)
+                    {
+                        q.IsPaused = flg;
+                        q.IsCancellingPlayerDrivenCombatActions = false;
+                    }
+                    break;
+                }
+            }
+        }
+        return $"{nextActionId}|{string.Join(",", picked)}|{canceledCount}|{string.Join(",", queues.Select(q => q.Actions.Count))}";
+    }
+
+    // ========================================================================
+    // 11. TIMELINE_SEEK (Multi-player combat replay, keyframe seek & FNV-1a checksum)
+    // ========================================================================
+    private const ulong FnvOffsetBasis = 14695981039346656037uL;
+    private const ulong FnvPrime = 1099511628211uL;
+    private static ulong Fnv1aByte(ulong h, byte b) => (h ^ b) * FnvPrime;
+    private static ulong Fnv1aUInt64(ulong h, ulong v)
+    {
+        for (int i = 0; i < 8; i++) h = Fnv1aByte(h, (byte)((v >> (8 * i)) & 0xFF));
+        return h;
+    }
+    private static ulong Fnv1aNat(ulong h, int n) => Fnv1aUInt64(h, (ulong)n);
+    private static ulong Fnv1aInt(ulong h, long x) => Fnv1aNat(Fnv1aByte(h, (byte)(x < 0 ? 1 : 0)), (int)Math.Abs(x));
+    private static ulong Fnv1aString(ulong h, string s)
+    {
+        h = Fnv1aUInt64(h, (ulong)s.Length);
+        foreach (char c in s) h = Fnv1aByte(h, (byte)((uint)c % 256u));
+        return h;
+    }
+
+    private sealed class TPower
+    {
+        public int InstId; public string Entry = ""; public bool IsDebuff; public bool AllowNeg; public int Amt;
+        public TPower Clone() => new() { InstId = InstId, Entry = Entry, IsDebuff = IsDebuff, AllowNeg = AllowNeg, Amt = Amt };
+    }
+    private sealed class TCreature
+    {
+        public int Id; public string Entry = ""; public int Side; public int Hp; public int MaxHp; public int Block;
+        public List<TPower> Powers = new();
+        public string MoveId = ""; public List<string> StateLog = new();
+        public TCreature Clone() => new() { Id = Id, Entry = Entry, Side = Side, Hp = Hp, MaxHp = MaxHp, Block = Block, Powers = Powers.Select(p => p.Clone()).ToList(), MoveId = MoveId, StateLog = new List<string>(StateLog) };
+        public int GetPowerAmt(string entry) => Powers.FirstOrDefault(p => p.Entry == entry)?.Amt ?? 0;
+        public bool HasPower(string entry) => Powers.Any(p => p.Entry == entry);
+    }
+    private sealed class TCard
+    {
+        public int InstId; public string Entry = ""; public int Cost; public int UpgradeLevel;
+        public TCard Clone() => new() { InstId = InstId, Entry = Entry, Cost = Cost, UpgradeLevel = UpgradeLevel };
+    }
+    private sealed class TPlayer
+    {
+        public int Pid; public int Cid; public int Energy; public int BaseMaxEnergy; public int Stars; public int TurnNumber;
+        public bool HasPotion;
+        public List<TCard> Hand = new(); public List<TCard> Draw = new(); public List<TCard> Discard = new(); public List<TCard> Exhaust = new();
+        public TPlayer Clone() => new() { Pid = Pid, Cid = Cid, Energy = Energy, BaseMaxEnergy = BaseMaxEnergy, Stars = Stars, TurnNumber = TurnNumber, HasPotion = HasPotion, Hand = Hand.Select(c => c.Clone()).ToList(), Draw = Draw.Select(c => c.Clone()).ToList(), Discard = Discard.Select(c => c.Clone()).ToList(), Exhaust = Exhaust.Select(c => c.Clone()).ToList() };
+    }
+    private sealed class TSimState
+    {
+        public int RoundNumber = 1; public int Side = 1; public bool IsInProgress = true; public bool IsEnding = false;
+        public RngOracle Rng = new(1);
+        public int NextInstanceId = 1000;
+        public int NextActionId = 0; public int NextChecksumId = 0;
+        public List<TCreature> Creatures = new();
+        public List<TPlayer> Players = new();
+        public TSimState Clone() => new() { RoundNumber = RoundNumber, Side = Side, IsInProgress = IsInProgress, IsEnding = IsEnding, Rng = Rng.Clone(), NextInstanceId = NextInstanceId, NextActionId = NextActionId, NextChecksumId = NextChecksumId, Creatures = Creatures.Select(c => c.Clone()).ToList(), Players = Players.Select(p => p.Clone()).ToList() };
+        public TCreature? FindC(int id) => Creatures.FirstOrDefault(c => c.Id == id);
+        public TPlayer? FindP(int pid) => Players.FirstOrDefault(p => p.Pid == pid);
+    }
+
+    private static ulong ComputeTimelineChecksum(TSimState st)
+    {
+        ulong h = FnvOffsetBasis;
+        h = Fnv1aUInt64(h, 0); // runSeed = 0
+        h = Fnv1aNat(h, 0);    // actIndex = 0
+        h = Fnv1aNat(h, 99);   // gold = 99
+        h = Fnv1aNat(h, 0);    // totalFloors = 0
+        h = Fnv1aNat(h, st.NextActionId);
+        h = Fnv1aNat(h, 0);    // nextHookId = 0
+        h = Fnv1aByte(h, 1);   // queueSet.isInCombat = true
+        h = Fnv1aNat(h, 0);    // canceledCount = 0
+        h = Fnv1aNat(h, st.NextChecksumId);
+        h = Fnv1aByte(h, 1);   // combat = some
+        h = Fnv1aNat(h, 1);    // combatId = 1
+        h = Fnv1aNat(h, st.RoundNumber);
+        h = Fnv1aNat(h, st.Side);
+        h = Fnv1aByte(h, (byte)(st.IsInProgress ? 1 : 0));
+        h = Fnv1aByte(h, (byte)(st.IsEnding ? 1 : 0));
+        h = Fnv1aNat(h, st.Rng.Counter);
+        h = Fnv1aUInt64(h, st.Rng.State.S0);
+        h = Fnv1aUInt64(h, st.Rng.State.S1);
+        h = Fnv1aUInt64(h, st.Rng.State.S2);
+        h = Fnv1aUInt64(h, st.Rng.State.S3);
+        h = Fnv1aNat(h, st.NextInstanceId);
+        h = Fnv1aNat(h, st.Creatures.Count);
+        foreach (var c in st.Creatures)
+        {
+            h = Fnv1aNat(h, c.Id);
+            h = Fnv1aNat(h, c.Hp);
+            h = Fnv1aNat(h, c.MaxHp);
+            h = Fnv1aNat(h, c.Block);
+            h = Fnv1aNat(h, c.Powers.Count);
+            foreach (var p in c.Powers)
+            {
+                h = Fnv1aString(h, p.Entry);
+                h = Fnv1aInt(h, p.Amt);
+            }
+        }
+        h = Fnv1aNat(h, st.Players.Count);
+        foreach (var p in st.Players)
+        {
+            h = Fnv1aNat(h, p.Pid);
+            h = Fnv1aNat(h, p.Pid == 1 ? 1 : 0); // potions.length
+            h = Fnv1aByte(h, 1);
+            h = Fnv1aNat(h, p.Energy);
+            h = Fnv1aNat(h, p.Stars);
+            h = Fnv1aNat(h, p.Hand.Count);
+            h = Fnv1aNat(h, p.Draw.Count);
+            h = Fnv1aNat(h, p.Discard.Count);
+            h = Fnv1aNat(h, p.Exhaust.Count);
+            foreach (var c in p.Hand.Concat(p.Draw).Concat(p.Discard))
+            {
+                h = Fnv1aNat(h, c.InstId);
+                h = Fnv1aString(h, c.Entry);
+            }
+        }
+        return h;
+    }
+
+    private static void TApplyDamageHit(TSimState st, int? dealerCid, int targetCid, decimal baseAmt, ValuePropFlags props)
+    {
+        var d = dealerCid.HasValue ? st.FindC(dealerCid.Value) : null;
+        if (d != null && d.Hp <= 0) return;
+        var t = st.FindC(targetCid);
+        if (t == null || t.Hp <= 0) return;
+        decimal num = baseAmt;
+        if (props.IsPoweredAttack())
+        {
+            if (d != null) num += d.GetPowerAmt("STRENGTH_POWER");
+            if (d != null && d.HasPower("WEAK_POWER")) num *= 0.75m;
+            if (t.HasPower("VULNERABLE_POWER")) num *= 1.5m;
+        }
+        num = Math.Max(0m, num);
+        decimal blockedDec = props.HasFlag(ValuePropFlags.Unblockable) ? 0m : Math.Min((decimal)t.Block, num);
+        int blockedTrunc = Math.Max(0, (int)decimal.Truncate(blockedDec));
+        t.Block -= Math.Min(t.Block, blockedTrunc);
+        decimal rem = Math.Max(0m, num - blockedDec);
+        int hpLoss = Math.Max(0, (int)decimal.Truncate(Math.Clamp(rem, 0m, (decimal)StatCap)));
+        t.Hp -= Math.Min(t.Hp, hpLoss);
+    }
+
+    private static void TApplyPower(TSimState st, int targetCid, string entry, bool isDebuff, bool allowNeg, int amt)
+    {
+        if (st.IsEnding || amt == 0) return;
+        var t = st.FindC(targetCid);
+        if (t == null) return;
+        var ex = t.Powers.FirstOrDefault(p => p.Entry == entry);
+        if (ex != null)
+        {
+            ex.Amt = Math.Clamp(ex.Amt + amt, -StatCap, StatCap);
+            bool rem = allowNeg ? ex.Amt == 0 : ex.Amt <= 0;
+            if (rem) t.Powers.Remove(ex);
+        }
+        else
+        {
+            int newId = st.NextInstanceId++;
+            int clamped = Math.Clamp(amt, -StatCap, StatCap);
+            bool rem = allowNeg ? clamped == 0 : clamped <= 0;
+            if (!rem) t.Powers.Add(new TPower { InstId = newId, Entry = entry, IsDebuff = isDebuff, AllowNeg = allowNeg, Amt = clamped });
+        }
+    }
+
+    private static void TCheckWin(TSimState st)
+    {
+        if (!st.IsInProgress) return;
+        if (st.Players.All(p => (st.FindC(p.Cid)?.Hp ?? 0) <= 0))
+        {
+            st.IsInProgress = false; st.IsEnding = true; return;
+        }
+        if (!st.Creatures.Any(c => c.Side == 2 && c.Hp > 0))
+        {
+            st.IsInProgress = false; st.IsEnding = true;
+        }
+    }
+
+    private static void TStep(TSimState st, string tok)
+    {
+        void PlayCard(int pid, int cid, int? tid)
+        {
+            st.NextActionId++;
+            var p = st.FindP(pid);
+            if (p == null) return;
+            var card = p.Hand.FirstOrDefault(c => c.InstId == cid);
+            if (card == null || p.Energy < card.Cost) return;
+            p.Energy -= card.Cost;
+            p.Hand.Remove(card);
+            if (card.Entry == "BASH")
+            {
+                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 8m, ValuePropFlags.Move);
+                if (tid.HasValue) TApplyPower(st, tid.Value, "VULNERABLE_POWER", true, false, 2);
+            }
+            else if (card.Entry == "STRIKE_IRONCLAD")
+            {
+                decimal d = card.UpgradeLevel > 0 ? 9m : 6m;
+                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, d, ValuePropFlags.Move);
+            }
+            else if (card.Entry == "TWIN_STRIKE")
+            {
+                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 5m, ValuePropFlags.Move);
+                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 5m, ValuePropFlags.Move);
+            }
+            else if (card.Entry == "DEFEND_IRONCLAD")
+            {
+                var selfC = st.FindC(p.Cid);
+                if (selfC != null && !st.IsEnding && selfC.Hp > 0)
+                    selfC.Block = Math.Min(StatCap, selfC.Block + 5);
+            }
+            else if (card.Entry == "UPPERCUT")
+            {
+                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 13m, ValuePropFlags.Move);
+                if (tid.HasValue) TApplyPower(st, tid.Value, "WEAK_POWER", true, false, 1);
+                if (tid.HasValue) TApplyPower(st, tid.Value, "VULNERABLE_POWER", true, false, 1);
+            }
+            p.Discard.Add(card);
+            TCheckWin(st);
+        }
+
+        void UseFirePot()
+        {
+            st.NextActionId++;
+            var p = st.FindP(1);
+            if (p == null || !st.IsInProgress || !p.HasPotion) return;
+            p.HasPotion = false;
+            TApplyDamageHit(st, p.Cid, 200, 20m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
+            TCheckWin(st);
+        }
+
+        void EndRound()
+        {
+            if (!st.IsInProgress) return;
+            // EndPlayerTurnPhase1+2 flush hand -> discard
+            foreach (var p in st.Players)
+            {
+                foreach (var c in p.Hand.ToList())
+                {
+                    p.Hand.Remove(c);
+                    p.Discard.Add(c);
+                }
+            }
+            st.Side = 2; // enemy
+            // ClearTurnStartBlock(.enemy)
+            foreach (var c in st.Creatures.Where(x => x.Side == 2)) c.Block = 0;
+            // COOP_GUARDIAN turn
+            var g = st.FindC(200);
+            if (g != null && g.Hp > 0 && st.IsInProgress)
+            {
+                bool first = g.StateLog.Count == 0;
+                string move = first ? g.MoveId : (g.MoveId == "SLAM" ? "FORTIFY" : "SLAM");
+                g.MoveId = move;
+                g.StateLog.Add(move);
+                if (move == "SLAM")
+                {
+                    foreach (var ally in st.Creatures.Where(c => c.Side == 1 && c.Hp > 0))
+                        TApplyDamageHit(st, g.Id, ally.Id, 7m, ValuePropFlags.Move);
+                }
+                else
+                {
+                    if (!st.IsEnding && g.Hp > 0) g.Block = Math.Min(StatCap, g.Block + 8);
+                    TApplyPower(st, g.Id, "STRENGTH_POWER", false, true, 1);
+                }
+            }
+            TCheckWin(st);
+            if (!st.IsInProgress) return;
+            // EndEnemyTurn
+            foreach (var p in st.Players) p.TurnNumber++;
+            st.RoundNumber++;
+            st.Side = 1;
+            foreach (var c in st.Creatures.Where(x => x.Side == 1))
+            {
+                var ow = st.FindP(c.Id == 101 ? 1 : 2);
+                if (ow == null || ow.TurnNumber != 1) c.Block = 0;
+            }
+            // SetupPlayerTurn for P1 then P2
+            foreach (var p in st.Players)
+            {
+                p.Energy = p.BaseMaxEnergy;
+                for (int i = 0; i < 5; i++)
+                {
+                    if (p.Hand.Count >= 10) break;
+                    if (p.Draw.Count == 0 && p.Discard.Count > 0)
+                    {
+                        p.Draw = RngOracle.UnstableShuffleGeneric(p.Discard, st.Rng);
+                        p.Discard.Clear();
+                    }
+                    if (p.Draw.Count == 0) break;
+                    var top = p.Draw[0];
+                    p.Draw.RemoveAt(0);
+                    p.Hand.Add(top);
+                }
+            }
+        }
+
+        switch (tok)
+        {
+            case "P1_BASH": PlayCard(1, 1001, 200); break;
+            case "P1_STRIKE": PlayCard(1, 1002, 200); break;
+            case "P1_TWIN": PlayCard(1, 1003, 200); break;
+            case "P1_FPOT": UseFirePot(); break;
+            case "P2_DEF": PlayCard(2, 2001, null); break;
+            case "P2_STRIKEP": PlayCard(2, 2002, 200); break;
+            case "P2_UPPER": PlayCard(2, 2003, 200); break;
+            case "END_ROUND": EndRound(); break;
+        }
+        st.NextChecksumId++;
+    }
+
+    private static string EvalTimelineSeek(string[] f)
+    {
+        ulong seed = ulong.Parse(f[1], CultureInfo.InvariantCulture);
+        int enemyHp = Math.Max(1, int.Parse(f[2], CultureInfo.InvariantCulture));
+        int stride = Math.Max(1, int.Parse(f[3], CultureInfo.InvariantCulture));
+        var acts = string.IsNullOrWhiteSpace(f.Length > 4 ? f[4] : "")
+            ? new List<string>()
+            : f[4].Split(';').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
+
+        var init = new TSimState { Rng = new RngOracle(seed) };
+        init.Creatures.Add(new TCreature { Id = 101, Entry = "IRONCLAD", Side = 1, Hp = 80, MaxHp = 80 });
+        init.Creatures.Add(new TCreature { Id = 102, Entry = "SILENT", Side = 1, Hp = 70, MaxHp = 70 });
+        init.Creatures.Add(new TCreature { Id = 200, Entry = "COOP_GUARDIAN", Side = 2, Hp = enemyHp, MaxHp = enemyHp, MoveId = "SLAM" });
+        init.Players.Add(new TPlayer
+        {
+            Pid = 1, Cid = 101, Energy = 5, BaseMaxEnergy = 3, TurnNumber = 1, HasPotion = true,
+            Hand = new()
+            {
+                new TCard { InstId = 1001, Entry = "BASH", Cost = 2 },
+                new TCard { InstId = 1002, Entry = "STRIKE_IRONCLAD", Cost = 1 },
+                new TCard { InstId = 1003, Entry = "TWIN_STRIKE", Cost = 1 }
+            }
+        });
+        init.Players.Add(new TPlayer
+        {
+            Pid = 2, Cid = 102, Energy = 5, BaseMaxEnergy = 3, TurnNumber = 1, HasPotion = false,
+            Hand = new()
+            {
+                new TCard { InstId = 2001, Entry = "DEFEND_IRONCLAD", Cost = 1 },
+                new TCard { InstId = 2002, Entry = "STRIKE_IRONCLAD", Cost = 1, UpgradeLevel = 1 },
+                new TCard { InstId = 2003, Entry = "UPPERCUT", Cost = 2 }
+            }
+        });
+
+        var kfs = new List<(int idx, TSimState state, ulong cs)> { (0, init.Clone(), ComputeTimelineChecksum(init)) };
+        var cur = init.Clone();
+        for (int i = 0; i < acts.Count; i++)
+        {
+            TStep(cur, acts[i]);
+            int stepIdx = i + 1;
+            if (stepIdx % stride == 0) kfs.Add((stepIdx, cur.Clone(), ComputeTimelineChecksum(cur)));
+        }
+
+        TSimState Seek(int target)
+        {
+            var kf = kfs.Last(k => k.idx <= target);
+            var s = kf.state.Clone();
+            for (int i = kf.idx; i < Math.Min(target, acts.Count); i++) TStep(s, acts[i]);
+            return s;
+        }
+
+        int mid = acts.Count / 2;
+        var fullMid = init.Clone();
+        for (int i = 0; i < mid; i++) TStep(fullMid, acts[i]);
+        ulong fullCsum = ComputeTimelineChecksum(cur);
+        bool m0 = ComputeTimelineChecksum(Seek(0)) == ComputeTimelineChecksum(init);
+        bool mm = ComputeTimelineChecksum(Seek(mid)) == ComputeTimelineChecksum(fullMid);
+        bool mf = ComputeTimelineChecksum(Seek(acts.Count)) == fullCsum;
+
+        int eHp = cur.FindC(200)!.Hp;
+        int p1Hp = cur.FindC(101)!.Hp;
+        int p2Hp = cur.FindC(102)!.Hp;
+        int p1E = cur.FindP(1)!.Energy;
+        int p2E = cur.FindP(2)!.Energy;
+        return $"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{fullCsum}|{(m0 ? 1 : 0)},{(mm ? 1 : 0)},{(mf ? 1 : 0)}";
+    }
+
     private static string EvalLine(string line)
     {
         string[] f = line.Split('\t');
         return f[0] switch
         {
-            "RNG_SEQ"      => EvalRngSeq(f[1], f[2]),
-            "RNG_SHUFFLE"  => EvalRngShuffle(f[1], f.Length > 2 ? f[2] : ""),
-            "DMG_PIPE"     => EvalDmgPipe(f),
-            "BLK_PIPE"     => EvalBlkPipe(f),
-            "CREATURE_DMG" => EvalCreatureDmg(f),
-            "POWER_STACK"  => EvalPowerStack(f),
-            "CARD_COST"    => EvalCardCost(f),
-            "RARITY_ODDS"  => EvalRarityOdds(f),
-            "MOD_SORT"     => EvalModSort(f),
-            _              => $"UNKNOWN_OP:{f[0]}"
+            "RNG_SEQ"       => EvalRngSeq(f[1], f[2]),
+            "RNG_SHUFFLE"   => EvalRngShuffle(f[1], f.Length > 2 ? f[2] : ""),
+            "DMG_PIPE"      => EvalDmgPipe(f),
+            "BLK_PIPE"      => EvalBlkPipe(f),
+            "CREATURE_DMG"  => EvalCreatureDmg(f),
+            "POWER_STACK"   => EvalPowerStack(f),
+            "CARD_COST"     => EvalCardCost(f),
+            "RARITY_ODDS"   => EvalRarityOdds(f),
+            "MOD_SORT"      => EvalModSort(f),
+            "QUEUE_SET"     => EvalQueueSet(f),
+            "TIMELINE_SEEK" => EvalTimelineSeek(f),
+            _               => $"UNKNOWN_OP:{f[0]}"
         };
     }
 

@@ -2,16 +2,18 @@
 """
 Cross-language `.NET 9` <-> Lean 4 differential tester for Slay the Spire 2 logic model.
 
-Generates 650+ randomized and adversarial edge-case test vectors across 9 test families:
-  1. RNG_SEQ      (SplitMix64 + Xoshiro256** bit-exact stream & IEEE-754 double bits)
-  2. RNG_SHUFFLE  (UnstableShuffle Fisher-Yates child-RNG permutation)
-  3. DMG_PIPE     (Hook.ModifyDamageInternal: Strength, Weak, Vulnerable, PaperPhrog, LateMul, Cap)
-  4. BLK_PIPE     (Hook.ModifyBlock: Dexterity, Frail, Powered vs Unpowered)
-  5. CREATURE_DMG (CreatureCmd.Damage: Block, Intangible cap+AfterOsty, DieForYou Osty + Overkill)
-  6. POWER_STACK  (PowerCmd.Apply: Single/Counter, Clamp +/-999999999, AllowNegative, Artifact)
-  7. CARD_COST    (CardEnergyCost local Absolute/Relative + Hook delta + ExcessEnergyWithStars)
-  8. RARITY_ODDS  (CardRarityOdds Float32 bit-exact sequences & pity offset reset/clamp)
-  9. MOD_SORT     (ModHelper ordinal subscriber registration sort & deduplication)
+Generates 790 randomized and adversarial edge-case test vectors across 11 test families:
+  1. RNG_SEQ       (SplitMix64 + Xoshiro256** bit-exact stream & IEEE-754 double bits)
+  2. RNG_SHUFFLE   (UnstableShuffle Fisher-Yates child-RNG permutation)
+  3. DMG_PIPE      (Hook.ModifyDamageInternal: Strength, Weak, Vulnerable, PaperPhrog, LateMul, Cap)
+  4. BLK_PIPE      (Hook.ModifyBlock: Dexterity, Frail, Powered vs Unpowered)
+  5. CREATURE_DMG  (CreatureCmd.Damage: Block, Intangible cap+AfterOsty, DieForYou Osty + Overkill)
+  6. POWER_STACK   (PowerCmd.Apply: Single/Counter, Clamp +/-999999999, AllowNegative, Artifact)
+  7. CARD_COST     (CardEnergyCost local Absolute/Relative + Hook delta + ExcessEnergyWithStars)
+  8. RARITY_ODDS   (CardRarityOdds Float32 bit-exact sequences & pity offset reset/clamp)
+  9. MOD_SORT      (ModHelper ordinal subscriber registration sort & deduplication)
+ 10. QUEUE_SET     (Multiplayer ActionQueueSet concurrent queues, pause/choice/resume/cancel)
+ 11. TIMELINE_SEEK (Multi-player combat replay, FNV-1a 64-bit state checksum, & keyframe seek)
 
 Run via: `uv run python scripts/run_diff_test.py`
 """
@@ -173,6 +175,69 @@ def generate_vectors(seed: int = 20260401) -> list[str]:
     for _ in range(41):
         picks = [rng.choice(alphabet) for _ in range(rng.randint(1, 10))]
         rows.append("MOD_SORT\t" + ",".join(picks))
+
+    # 10. QUEUE_SET (concurrent ActionQueueSet pause, early resume, cancel, combat end) - 60 vectors
+    q_edges = [
+        "1,2\tENQ,1,2,1,1;ENQ,2,2,1,1;PICK;PAUSE,0,1;ENQ,1,2,1,1;PICK;POP,1;RESUME,0;PICK;POP,3;PICK",
+        "1,2\tENQ,1,2,1,1;EXEC,0;RESUME,0;PAUSE,0,0;PICK;POP,1;PICK",
+        "1,2\tENQ,1,2,1,1;ENQ,2,1,0,0;ENQ,1,3,1,0;CANCELPD;PICK;CEND;ENQ,1,2,1,1;CSTART;PICK",
+        "1,2,3\tENQ,3,2,1,1;ENQ,1,2,1,1;PPAUSED,1;PICK;PPAUSED,0;PICK;POP,1;PICK",
+    ]
+    for qe in q_edges:
+        rows.append(f"QUEUE_SET\t{qe}")
+    for _ in range(56):
+        pids = "1,2" if rng.random() < 0.7 else "1,2,3"
+        num_p = len(pids.split(","))
+        ops: list[str] = []
+        est_max_id = 0
+        for _ in range(rng.randint(5, 18)):
+            kind = rng.choice(["ENQ", "ENQ", "ENQ", "PICK", "EXEC", "PAUSE", "RESUME", "POP", "CANCELPD", "CEND", "CSTART", "PPAUSED"])
+            if kind == "ENQ":
+                pid = rng.randint(1, num_p)
+                tc = rng.choice([1, 2, 2, 3, 4])
+                pd = rng.randint(0, 1)
+                ip = rng.randint(0, 1)
+                ops.append(f"ENQ,{pid},{tc},{pd},{ip}")
+                est_max_id += 1
+            elif kind == "PICK":
+                ops.append("PICK")
+            elif kind == "EXEC":
+                aid = rng.randint(0, max(0, est_max_id - 1))
+                ops.append(f"EXEC,{aid}")
+            elif kind == "PAUSE":
+                aid = rng.randint(0, max(0, est_max_id - 1))
+                cpc = rng.randint(0, 1)
+                ops.append(f"PAUSE,{aid},{cpc}")
+            elif kind == "RESUME":
+                aid = rng.randint(0, max(0, est_max_id - 1))
+                ops.append(f"RESUME,{aid}")
+                est_max_id += 1
+            elif kind == "POP":
+                aid = rng.randint(0, max(0, est_max_id - 1))
+                ops.append(f"POP,{aid}")
+            elif kind == "PPAUSED":
+                ops.append(f"PPAUSED,{rng.randint(0, 1)}")
+            else:
+                ops.append(kind)
+        rows.append(f"QUEUE_SET\t{pids}\t{';'.join(ops)}")
+
+    # 11. TIMELINE_SEEK (multiplayer combat replay, keyframe seek, & FNV-1a 64-bit checksum) - 60 vectors
+    tl_edges = [
+        "42\t34\t1\tP1_TWIN;P2_STRIKEP;P1_BASH",
+        "42\t34\t2\tP1_BASH;P1_TWIN;P2_STRIKEP",
+        "99\t65\t2\tP1_FPOT;P2_DEF;END_ROUND;P1_BASH;P2_UPPER;END_ROUND;P1_STRIKE",
+        "777\t120\t3\tP2_UPPER;P1_TWIN;END_ROUND;P1_STRIKE;P2_STRIKEP;END_ROUND;P2_DEF;P1_BASH",
+    ]
+    for te in tl_edges:
+        rows.append(f"TIMELINE_SEEK\t{te}")
+    act_pool = ["P1_BASH", "P1_STRIKE", "P1_TWIN", "P1_FPOT", "P2_DEF", "P2_STRIKEP", "P2_UPPER", "END_ROUND"]
+    for _ in range(56):
+        seed = rng.randrange(0, 1 << 64)
+        ehp = rng.choice([12, 25, 34, 55, 80, 120])
+        stride = rng.randint(1, 5)
+        n_acts = rng.randint(1, 12)
+        seq = [rng.choice(act_pool) for _ in range(n_acts)]
+        rows.append(f"TIMELINE_SEEK\t{seed}\t{ehp}\t{stride}\t{';'.join(seq)}")
 
     return rows
 

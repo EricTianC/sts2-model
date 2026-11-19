@@ -2,9 +2,11 @@
   Executable Simulator & `.NET 9` Differential Test Runner (`lake exe sts2sim`).
   Modes:
     1. Default (`lake exe sts2sim`):
-       Runs all 30 VanillaShowcase tests + 4 ModTemplate tests + Catalog checks, exits 0 iff 100% pass.
-    2. Differential oracle mode (`lake exe sts2sim --diff <input.tsv>`):
-       Evaluates all 9 deterministic test families row-by-row for comparison with `DiffTest/Sts2Oracle`.
+       Runs all 45 executable assertions (30 Vanilla + 4 ModTemplates + 3 Catalog + 6 Timeline + 2 ReplayAnalyzerExample), exits 0 iff 100% pass.
+    2. Timeline demo (`lake exe sts2sim --timeline-demo`):
+       Prints the headless multiplayer timeline reconstruction & downstream analyzer example report.
+    3. Differential oracle mode (`lake exe sts2sim --diff <input.tsv>`):
+       Evaluates all 11 deterministic test families row-by-row for comparison with `DiffTest/Sts2Oracle`.
 -/
 import Sts2Model
 
@@ -13,10 +15,14 @@ open Sts2Model.Model
 open Sts2Model.Hook
 open Sts2Model.Command
 open Sts2Model.Combat
+open Sts2Model.Multiplayer
+open Sts2Model.Sim
+open Sts2Model.Replay
 open Sts2Model.Mechanics
 open Sts2Model.Run
 open Sts2Model.Catalog
 open Sts2Model.Examples
+open Sts2Model.Examples.ReplayAnalyzer
 
 private def parseUInt64! (s : String) : UInt64 :=
   match s.toNat? with
@@ -241,29 +247,162 @@ private def evalModSort (fields : List String) : String :=
   let reg := ids.foldl (fun r id => r.subscribeCombatHooks id []) ModHookRegistry.empty
   String.intercalate "," (reg.combatSubscribers.map (·.id))
 
+private def evalQueueSet (fields : List String) : String :=
+  let pids := (parseCsvStrings (fields[1]?.getD "1,2")).map parseNat!
+  let opsStr := fields[2]?.getD ""
+  let ops := if opsStr.trimAscii.isEmpty then [] else opsStr.splitOn ";"
+  let initQs := (ActionQueueSet.init pids).combatStarted
+  let (finalQs, picked) := ops.foldl (fun (qs, pAcc) rawOp =>
+    let tok := rawOp.trimAscii.toString
+    if tok.isEmpty then (qs, pAcc)
+    else
+      let ps := tok.splitOn ","
+      match ps[0]? with
+      | some "ENQ" =>
+          let pid := parseNat! (ps[1]?.getD "1")
+          let tCode := parseNat! (ps[2]?.getD "2")
+          let pDriven := parseNat! (ps[3]?.getD "1") == 1
+          let isPlay := parseNat! (ps[4]?.getD "1") == 1
+          let atp : GameActionType := match tCode with
+            | 0 => .none
+            | 1 => .combat
+            | 2 => .combatPlayPhaseOnly
+            | 3 => .nonCombat
+            | _ => .any
+          let pl : ReplayActionPayload := if isPlay then .playCard 1001 none else .endPlayerTurn true
+          ((qs.enqueue pid atp pDriven isPlay pl).1, pAcc)
+      | some "PICK" =>
+          let (qs1, opt) := qs.getReadyAction
+          let aid : Int := match opt with | some a => (a.actionId : Int) | none => -1
+          (qs1, pAcc ++ [aid])
+      | some "EXEC" =>
+          let aid := parseNat! (ps[1]?.getD "0")
+          (qs.beginExecuting aid, pAcc)
+      | some "PAUSE" =>
+          let aid := parseNat! (ps[1]?.getD "0")
+          let cpc := parseNat! (ps[2]?.getD "0") == 1
+          ((qs.pauseActionForPlayerChoice aid { cancelPlayCardActions := cpc }).1, pAcc)
+      | some "RESUME" =>
+          let oldId := parseNat! (ps[1]?.getD "0")
+          ((qs.resumeAction oldId).1, pAcc)
+      | some "POP" =>
+          let aid := parseNat! (ps[1]?.getD "0")
+          (qs.popAction aid, pAcc)
+      | some "CANCELPD" =>
+          (qs.startCancellingAllPlayerDrivenCombatActions, pAcc)
+      | some "CEND" =>
+          (qs.combatEnded, pAcc)
+      | some "CSTART" =>
+          (qs.combatStarted, pAcc)
+      | some "PPAUSED" =>
+          let flg := parseNat! (ps[1]?.getD "1") == 1
+          let qs1 := if flg then qs.pauseAllPlayerQueues else qs.unpauseAllPlayerQueues
+          (qs1, pAcc)
+      | _ => (qs, pAcc)) (initQs, [])
+  let pickedStr := String.intercalate "," (picked.map toString)
+  let remStr := String.intercalate "," (finalQs.queues.map fun q => toString q.actions.length)
+  s!"{finalQs.nextActionId}|{pickedStr}|{finalQs.canceledCount}|{remStr}"
+
+private def evalTimelineSeek (fields : List String) : String :=
+  let seed := parseUInt64! (fields[1]?.getD "1")
+  let enemyHp := max 1 (parseNat! (fields[2]?.getD "50"))
+  let stride := max 1 (parseNat! (fields[3]?.getD "2"))
+  let actsStr := fields[4]?.getD ""
+  let acts := if actsStr.trimAscii.isEmpty then [] else actsStr.splitOn ";"
+  let mkC (cid : CardInstanceId) (pid : PlayerId) (entry : String) (cost : Int)
+      (ct : CardType := .attack) (tt : TargetType := .anyEnemy) (upg : Nat := 0) : CardInstance :=
+    { instanceId := cid, modelId := ModelId.mkCard entry, ownerId := pid
+    , cardType := ct, rarity := .common, targetType := tt
+    , energyCost := CardEnergyCost.mkCanonical cost, upgradeLevel := upg }
+  let p1Hand :=
+    [ mkC 1001 1 "BASH" 2
+    , mkC 1002 1 "STRIKE_IRONCLAD" 1
+    , mkC 1003 1 "TWIN_STRIKE" 1 ]
+  let p2Hand :=
+    [ mkC 2001 2 "DEFEND_IRONCLAD" 1 .skill .self
+    , mkC 2002 2 "STRIKE_IRONCLAD" 1 .attack .anyEnemy 1
+    , mkC 2003 2 "UPPERCUT" 2 ]
+  let cP1 : Creature := { id := 101, modelId := ModelId.mkCharacter "IRONCLAD", side := .player, playerId := some 1, currentHp := 80, maxHp := 80 }
+  let cP2 : Creature := { id := 102, modelId := ModelId.mkCharacter "SILENT", side := .player, playerId := some 2, currentHp := 70, maxHp := 70 }
+  let cEnemy : Creature :=
+    { id := 200, modelId := ModelId.mkMonster "COOP_GUARDIAN", side := .enemy
+    , currentHp := enemyHp, maxHp := enemyHp
+    , monster := some { modelId := ModelId.mkMonster "COOP_GUARDIAN", currentMoveId := "SLAM" } }
+  let p1 : Player :=
+    { playerId := 1, creatureId := 101, characterId := ModelId.mkCharacter "IRONCLAD"
+    , potions := [some { modelId := ModelId.mkPotion "FIRE_POTION" }]
+    , combatState := some { energy := 5, baseMaxEnergy := 3, piles := { hand := p1Hand } } }
+  let p2 : Player :=
+    { playerId := 2, creatureId := 102, characterId := ModelId.mkCharacter "SILENT"
+    , combatState := some { energy := 5, baseMaxEnergy := 3, piles := { hand := p2Hand } } }
+  let cs : CombatState :=
+    { combatId := 1, roundNumber := 1, currentSide := .player, isInProgress := true
+    , allies := [cP1, cP2], enemies := [cEnemy], players := [p1, p2]
+    , rng := Rng.ofSeed seed, nextInstanceId := 1000 }
+  let initSt : TimelineState :=
+    { combat := some cs
+    , queueSet := (ActionQueueSet.init [1, 2]).combatStarted
+    , choiceSync := PlayerChoiceSynchronizer.init [1, 2] }
+  let evs : List TimelineEvent := acts.zipIdx.filterMap fun (rawTok, idx) =>
+    let tok := rawTok.trimAscii.toString
+    match tok with
+    | "P1_BASH" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 1, kind := .combat { eventType := .gameAction, playerId := some 1, payload := some (.playCard 1001 (some 200)) } }
+    | "P1_STRIKE" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 1, kind := .combat { eventType := .gameAction, playerId := some 1, payload := some (.playCard 1002 (some 200)) } }
+    | "P1_TWIN" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 1, kind := .combat { eventType := .gameAction, playerId := some 1, payload := some (.playCard 1003 (some 200)) } }
+    | "P1_FPOT" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 1, kind := .combat { eventType := .gameAction, playerId := some 1, payload := some (.usePotion 0 (some 200)) } }
+    | "P2_DEF" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 2, kind := .combat { eventType := .gameAction, playerId := some 2, payload := some (.playCard 2001 none) } }
+    | "P2_STRIKEP" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 2, kind := .combat { eventType := .gameAction, playerId := some 2, payload := some (.playCard 2002 (some 200)) } }
+    | "P2_UPPER" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 2, kind := .combat { eventType := .gameAction, playerId := some 2, payload := some (.playCard 2003 (some 200)) } }
+    | "END_ROUND" => some { seqIdx := idx, roundNumber := 1, actorPlayerId := 1, kind := .endRoundAndRunEnemies }
+    | _ => none
+  let archive := buildArchive vanillaEffectEnv initSt evs stride 1
+  let mid := evs.length / 2
+  let s0 := seek vanillaEffectEnv archive 0
+  let sMid := seek vanillaEffectEnv archive mid
+  let sFin := seek vanillaEffectEnv archive evs.length
+  let fullMid := replayEvents vanillaEffectEnv initSt (evs.take mid)
+  let fullFin := replayEvents vanillaEffectEnv initSt evs
+  let m0 := s0 == initSt && computeStateChecksum s0 == computeStateChecksum initSt
+  let mm := sMid == fullMid && computeStateChecksum sMid == computeStateChecksum fullMid
+  let mf := sFin == fullFin && computeStateChecksum sFin == computeStateChecksum fullFin
+  let csum := computeStateChecksum fullFin
+  let (eHp, p1Hp, p2Hp, p1E, p2E) := match fullFin.combat with
+    | none => (0, 0, 0, 0, 0)
+    | some c =>
+        ( (c.findCreature 200).map Creature.currentHp |>.getD 0
+        , (c.findCreature 101).map Creature.currentHp |>.getD 0
+        , (c.findCreature 102).map Creature.currentHp |>.getD 0
+        , ((c.findPlayer 1).bind Player.combatState).map PlayerCombatState.energy |>.getD 0
+        , ((c.findPlayer 2).bind Player.combatState).map PlayerCombatState.energy |>.getD 0 )
+  s!"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{csum}|{if m0 then 1 else 0},{if mm then 1 else 0},{if mf then 1 else 0}"
+
 private def evalDiffLine (line : String) : String :=
   let trimmed := line.trimAscii.toString
   if trimmed.isEmpty then ""
   else
     let fields := trimmed.splitOn "\t"
     match fields[0]? with
-    | some "RNG_SEQ"      => evalRngSeq (fields[1]?.getD "0") (fields[2]?.getD "0")
-    | some "RNG_SHUFFLE"  => evalRngShuffle (fields[1]?.getD "0") (fields[2]?.getD "")
-    | some "DMG_PIPE"     => evalDmgPipe fields
-    | some "BLK_PIPE"     => evalBlkPipe fields
-    | some "CREATURE_DMG" => evalCreatureDmg fields
-    | some "POWER_STACK"  => evalPowerStack fields
-    | some "CARD_COST"    => evalCardCost fields
-    | some "RARITY_ODDS"  => evalRarityOdds fields
-    | some "MOD_SORT"     => evalModSort fields
-    | _                   => s!"UNKNOWN_OP:{fields[0]?.getD ""}"
+    | some "RNG_SEQ"       => evalRngSeq (fields[1]?.getD "0") (fields[2]?.getD "0")
+    | some "RNG_SHUFFLE"   => evalRngShuffle (fields[1]?.getD "0") (fields[2]?.getD "")
+    | some "DMG_PIPE"      => evalDmgPipe fields
+    | some "BLK_PIPE"      => evalBlkPipe fields
+    | some "CREATURE_DMG"  => evalCreatureDmg fields
+    | some "POWER_STACK"   => evalPowerStack fields
+    | some "CARD_COST"     => evalCardCost fields
+    | some "RARITY_ODDS"   => evalRarityOdds fields
+    | some "MOD_SORT"      => evalModSort fields
+    | some "QUEUE_SET"     => evalQueueSet fields
+    | some "TIMELINE_SEEK" => evalTimelineSeek fields
+    | _                    => s!"UNKNOWN_OP:{fields[0]?.getD ""}"
 
 private def runRegressionSuite : IO UInt32 := do
   let catalogTests : List (String × Bool) :=
     [ ("catalog_cards_717", allCards.length == 717)
     , ("catalog_relics_316", allRelics.length == 316)
     , ("catalog_powers_304", allPowers.length == 304) ]
-  let suite := allVanillaTests ++ allModTemplateTests ++ catalogTests
+  let suite :=
+    allVanillaTests ++ allModTemplateTests ++ catalogTests ++ allTimelineTests ++
+      allReplayAnalyzerExampleTests
   let mut failed : Nat := 0
   for (name, ok) in suite do
     if ok then
@@ -283,6 +422,9 @@ def main (args : List String) : IO UInt32 := do
         let t := line.trimAscii.toString
         if !t.isEmpty then
           IO.println (evalDiffLine t)
+      return 0
+  | ["--timeline-demo"] =>
+      IO.println runLateVulnerableDemo
       return 0
   | _ =>
       runRegressionSuite
