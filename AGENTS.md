@@ -16,18 +16,22 @@
 
 ## 2. 不可违背的工程红线
 
-1. **纯 Lean 4.36.0 (`Std`) — 零 `Mathlib`**：
+1. **核心库独立性与泛用性边界**：
+   - `Sts2Model/` 核心层（除 `Sts2Model/Examples/` 外）**严禁**耦合具体业务启发式（如局后迟打易伤扫描）、特定结局对比视图或上层出牌搜索求解器；核心库只承载 STS2 原版规则语义与通用无 UI 模拟/时间线原语（`TimedCombatHistoryEntry`、`seek`、`switchViewer`、`forkTimeline`、FNV-1a 校验和）。
+   - 核心模块禁止 `import Sts2Model.Examples.*`。面向具体下游工具（如复盘分析器、斩杀搜索器）的参考实现与独立见证定理一律放在 `Sts2Model/Examples/` 下明确隔离。
+   - `.NET 9` 差分对拍仅用于核验原版 C# 语义与核心协议（不对拍自创复盘启发式）。
+2. **纯 Lean 4.36.0 (`Std`) — 零 `Mathlib`**：
    - 工具链固定为 `leanprover/lean4:v4.36.0`（见 `lean-toolchain`），`lakefile.toml` 与 `lake-manifest.json` 不得引入 `Mathlib` 或任何第三方 Lake 依赖。
-2. **零 `sorry`、零 `axiom`、零 `native_decide`**：
+3. **零 `sorry`、零 `axiom`、零 `native_decide`**：
    - `Sts2Model/` 与 `Sts2Sim/` 代码主体（注释之外）禁止出现任何 `sorry`、`axiom` 或 `native_decide`。
    - 核心证明经 `#print axioms` 检查，必须仅依赖 Lean 内置标准公理（`propext`、`Classical.choice`、`Quot.sound`）。
    - 大规模枚举列表的 `Nodup` 证明（如 717 张卡牌 / 316 个遗物 / 304 个能力）不得回退到 `native_decide`；须沿用 `Sts2Model/Catalog/Types.lean` 中的分块 `isStrictlySorted` + `strictlySorted_join` + 纯内核 `decide` 模式。
-3. **零警告与零错误**：
+4. **零警告与零错误**：
    - `lake build`（含 `lake clean && lake build`）与 `dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo` 均须达到 **0 errors / 0 warnings**。
-4. **轻量零外依测试栈**：
+5. **轻量零外依测试栈**：
    - `.NET 9` 对拍预言机（`DiffTest/Sts2Oracle`）保持纯 `net9.0`，零 NuGet 外部包。
    - 自动化脚本（`scripts/`）一律通过 `uv run python ...` 运行，且仅使用 Python 标准库。
-5. **差分失败绝不放宽断言**：
+6. **差分失败绝不放宽断言**：
    - 当 `.NET 9` 预言机与 Lean 4 (`lake exe sts2sim --diff`) 出现任何不一致时，**必须立即核对 `reference/sts2/` 原版 C# 实现**并修复真实语义偏差，严禁修改断言阈值、跳过用例或掩盖差异。
 
 ---
@@ -41,15 +45,18 @@
 | `Sts2Model/Hook/` | `Hook.cs` 全量 154 个钩子名录与快照 (`Registry`)、`HookBehavior` / `ModHelper` 注册表、`Pipeline` |
 | `Sts2Model/Command/` | `AttackCommand`、`CreatureCmd`、`CardCmd`、`PowerCmd`、`OrbCmd` |
 | `Sts2Model/Combat/` | 多人确定性 `GameAction` 队列、`MonsterAI` 无环状态机、`TurnLoop` (`CombatManager`) |
+| `Sts2Model/Multiplayer/` | 多人并发 `ActionQueueSet`（分玩家队列、选牌暂停/唤醒、取消标志）与 `PlayerChoiceSynchronizer` |
+| `Sts2Model/Sim/` | 无 UI 效果原语解释器 (`EffectIR`)、`OpaqueStateDelta` 回退与 Tier-1 原版内容 (`VanillaEffects`) |
+| `Sts2Model/Replay/` | 全 18+9 语义历史与通用步索引记录 (`History` 含 `TimedCombatHistoryEntry`)、关键帧 Seek / 通用分叉 `forkTimeline` 与 64 位 FNV-1a 校验和 (`Timeline`) |
 | `Sts2Model/Mechanics/` | `Orbs` (Defect)、`Necrobinder` (Osty / Doom)、`Regent` (Stars / Forge)、`Fool` (Arrow / Melody)、`Dread` |
 | `Sts2Model/Run/` | `ActMap` DAG、`CardRarityOdds` / `UnknownMapPointOdds` / `RelicGrabBag`、`RunLoop` |
 | `Sts2Model/Catalog/` | 由 `scripts/extract_catalog.py` 自动生成的 `Cards` (717) / `Relics` (316) / `Powers` (304) 与 `Verify.lean` |
-| `Sts2Model/Proofs/` | 8 个形式化证明模块：`DamagePipeline`、`HookSafety`、`CardPiles`、`PowerSystem`、`TurnMachine`、`Determinism`、`Mechanics`、`MapTopology` |
-| `Sts2Model/Examples/` | `VanillaShowcase.lean`（30 个原版规则验证）与 `ModTemplates.lean`（4 个 Mod 模板及安全契约） |
+| `Sts2Model/Proofs/` | 9 个形式化证明模块：`DamagePipeline`、`HookSafety`、`CardPiles`、`PowerSystem`、`TurnMachine`、`Determinism`、`Mechanics`、`MapTopology`、`ReplayTimeline` |
+| `Sts2Model/Examples/` | `VanillaShowcase.lean`（30 个原版规则）、`ModTemplates.lean`（4 个 Mod 模板）、`TimelineShowcase.lean`（6 个通用时间线引擎验证），以及独立下游示例 `ReplayAnalyzerExample.lean`（2 项复盘/求解示例 + `--timeline-demo`） |
 | `Sts2Model.lean` | 公共伞形导出模块；新增 `Sts2Model/**/*.lean` 后必须同步在此 `import` |
-| `Sts2Sim/Main.lean` | `lake exe sts2sim` 默认回归测试入口（37 项断言）及 `--diff <tsv>` 对拍服务端 |
+| `Sts2Sim/Main.lean` | `lake exe sts2sim` 默认回归测试入口（45 项断言）、`--timeline-demo` 与 `--diff <tsv>` 对拍服务端 |
 | `DiffTest/Sts2Oracle/` | `.NET 9` C# 直译参考预言机（`Sts2Oracle.csproj`、`Program.cs`） |
-| `scripts/` | `extract_catalog.py`（静态目录抽取）与 `run_diff_test.py`（9 族 670 向量差分对拍） |
+| `scripts/` | `extract_catalog.py`（静态目录抽取）与 `run_diff_test.py`（11 族 790 向量差分对拍） |
 | `docs/` | `traceability.md`（源码溯源与定理全表）与 `modder_guide.md`（Mod 开发者建模指南） |
 
 ---
@@ -87,10 +94,11 @@ import Sts2Model
 #print axioms Sts2Model.Catalog.allCards_nodup
 EOF
 
-# 4. 运行 37 项可执行回归测试
+# 4. 运行 45 项可执行回归测试与无 UI 时间线演示
 lake exe sts2sim
+lake exe sts2sim --timeline-demo
 
-# 5. 构建 .NET 9 对拍预言机并执行 9 族 670 向量差分测试
+# 5. 构建 .NET 9 对拍预言机并执行 11 族 790 向量差分测试
 dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo
 uv run python scripts/run_diff_test.py
 
@@ -106,6 +114,7 @@ uv run python scripts/extract_catalog.py
 
 - **改逻辑必同步**：
   1. 新增 `Sts2Model/` 子模块时同步更新 `Sts2Model.lean`；
-  2. 修改或新增规则/不变量时同步补齐 `Sts2Model/Proofs/` 定理、`Sts2Sim/Main.lean` / `Examples/` 用例，以及（若属 9 大对拍族或新家族）`DiffTest/Sts2Oracle/Program.cs` + `scripts/run_diff_test.py`；
-  3. 更新目录脚本、定理名、计数或对拍覆盖面后同步刷新 `docs/traceability.md`、`docs/modder_guide.md` 与 `README.md`。
+  2. 修改或新增规则/不变量时同步补齐 `Sts2Model/Proofs/` 定理、`Sts2Sim/Main.lean` / `Examples/` 用例，以及（若属 11 大核心语义家族或新原版家族）`DiffTest/Sts2Oracle/Program.cs` + `scripts/run_diff_test.py`；
+  3. 确保 `fnv1aString` 保持纯内核可归约（避免使用不可在 Lean 内核 `decide` 展开的 `@[extern]` `ByteArray` 函数）并与 `.NET 9` `ComputeTimelineChecksum` 位精确同步；
+  4. 更新目录脚本、定理名、计数或对拍覆盖面后同步刷新 `docs/traceability.md`、`docs/modder_guide.md` 与 `README.md`。
 - **提交风格**：采用常规语义化前缀与作用域（如 `chore:`、`feat(core,model):`、`feat(engine):`、`feat(catalog):`、`feat(proofs,examples):`、`test(sim,difftest):`、`docs:`），按逻辑层做原子提交；每次提交前确认 `git status` 不含 `reference/`、`sts2.zip`、`.lake/` 或 `.NET` 编译产物。

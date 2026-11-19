@@ -14,21 +14,25 @@ sts2_ideal/
 │   ├── Hook/        # Registry (154 hooks)、ModHelper (HookBehavior / Pool & Hook 注册表)、Pipeline
 │   ├── Command/     # AttackCommand、CreatureCmd、CardCmd、PowerCmd、OrbCmd
 │   ├── Combat/      # GameAction 队列、MonsterAI 状态机、TurnLoop 回合控制
+│   ├── Multiplayer/ # 多玩家并发 ActionQueueSet 与 PlayerChoiceSynchronizer
+│   ├── Sim/         # 无 UI EffectIR 解释器、OpaqueStateDelta 与 Tier-1 原版内容
+│   ├── Replay/      # 18+9 语义历史与通用步索引、关键帧 Seek / forkTimeline 分叉原语 / FNV-1a
 │   ├── Mechanics/   # Orbs、Necrobinder (Osty/Doom)、Regent (Stars/Forge)、Fool (Arrow/Melody)、Dread
 │   ├── Run/         # ActMap DAG、CardRarityOdds / UnknownMapPointOdds / RelicGrabBag、RunLoop
 │   ├── Catalog/     # 从 reference/sts2/ 自动抽取的 717 Cards / 316 Relics / 304 Powers 与核证明
-│   ├── Examples/    # 30 个原版演示 (VanillaShowcase) + 4 个 Mod 模板及证明 (ModTemplates)
-│   └── Proofs/      # 8 个主题定理证明模块（全项目零 sorry / zero axiom / zero native_decide）
-├── Sts2Sim/         # 可执行验证入口 (`lake exe sts2sim` 与 `--diff`)
+│   ├── Examples/    # 核心演示 (`VanillaShowcase`/`ModTemplates`/`TimelineShowcase`) 与独立下游示例 (`ReplayAnalyzerExample`)
+│   └── Proofs/      # 9 个主题定理证明模块（全项目零 sorry / zero axiom / zero native_decide）
+├── Sts2Sim/         # 可执行验证入口 (`lake exe sts2sim`、`--timeline-demo`、`--diff`)
 ├── DiffTest/        # .NET 9 C# 对拍预言机 (`Sts2Oracle`, 零第三方依赖)
 ├── scripts/         # `extract_catalog.py` 与 `run_diff_test.py` (`uv run python`)
 └── docs/            # 溯源矩阵 (`traceability.md`) 与本开发指南 (`modder_guide.md`)
 ```
 
 核心工程约束：
-1. **纯粹 Lean 4.36.0（零 `Mathlib`）**：编译快速轻量，仅使用标准库与核心 Tactics（`omega`、`simp`、`decide`）。
-2. **双精度与浮点严格分离**：所有遵循 C# `System.Decimal` 的金额/伤害/格挡/费用使用精确有理定点数 [Dec](../Sts2Model/Core/Dec.lean) 建模；而原版显式使用 32 位浮点的 `CardRarityOdds` 与 RNG 序列同时提供 [IEEE-754 `Float32` / `UInt64` 位精确模型](../Sts2Model/Run/Odds.lean) 用于与 `.NET 9` 逐比特对拍。
-3. **无禁用公理**：`Sts2Model/` 与 `Sts2Sim/` 内严格禁用 `sorry`、`axiom` 与 `native_decide`，一切性质均经 Lean 内核直接检验。
+1. **核心库独立性与泛用性**：核心 `Sts2Model/` 仅建模 STS2 原版语义与通用无 UI 时间线原语，绝不包含业务启发式分析器或特定搜索算法（且绝不反向 `import Sts2Model.Examples.*`）；下游 Mod 工具应独立构筑在核心公共 API 之上（参见 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean)）。
+2. **纯粹 Lean 4.36.0（零 `Mathlib`）**：编译快速轻量，仅使用标准库与核心 Tactics（`omega`、`simp`、`decide`）。
+3. **双精度与浮点严格分离**：所有遵循 C# `System.Decimal` 的金额/伤害/格挡/费用使用精确有理定点数 [Dec](../Sts2Model/Core/Dec.lean) 建模；而原版显式使用 32 位浮点的 `CardRarityOdds` 与 RNG 序列同时提供 [IEEE-754 `Float32` / `UInt64` 位精确模型](../Sts2Model/Run/Odds.lean) 用于与 `.NET 9` 逐比特对拍。
+4. **无禁用公理**：`Sts2Model/` 与 `Sts2Sim/` 内严格禁用 `sorry`、`axiom` 与 `native_decide`，一切性质均经 Lean 内核直接检验。
 
 ---
 
@@ -38,10 +42,11 @@ sts2_ideal/
 # 1. 编译全量 Lean 模型与证明
 lake build
 
-# 2. 运行全部 37 项内置可执行测试（30 个原版场景 + 4 个 Mod 模板 + 3 项目录断言）
+# 2. 运行全部 45 项内置可执行测试及脱机时间线反事实演示
 lake exe sts2sim
+lake exe sts2sim --timeline-demo
 
-# 3. 编译 .NET 9 对拍预言机并执行 670 条跨语言差分测试
+# 3. 编译 .NET 9 对拍预言机并执行 11 族 790 条跨语言差分测试
 dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo
 uv run python scripts/run_diff_test.py
 
@@ -110,6 +115,13 @@ Regent 风格的费星双资源攻击牌 `modStarStrikeCardId`（由 `mkModStarS
 - `ModHookRegistry.subscribeCombatHooks` 使用 `insertSubscriberSorted`（按 Ordinal 字符串严格比较、去重插入）保证多 Mod 无论先加载哪一个，触发顺序完全一致；
 - `ModPoolRegistry.concatModelsFromMods` 一旦执行拼池即冻结对应 `poolKey`（`isFrozen = true`），后续调用 `addModelToPool` 均为空操作（`modHelper_pool_freeze_monotonic`）；
 - `modComposition_safe` 示例展示了上述三条静态保证的联合证明写法。
+
+### 3.5 脱机无 UI 多人时间线底座与独立下游扩展示例
+
+如果你在编写**多人复盘时间线 Mod**、**对局分析工具**或需要在脱离 Godot UI/动画的无头环境中做反事实推演，核心库已经为你准备好通用基础设施，无需自己重造协议轮子（核心用法见 [TimelineShowcase.lean](../Sts2Model/Examples/TimelineShowcase.lean)）：
+1. **关键帧归档、随机跳转与通用分叉原语**：使用 [Timeline.lean](../Sts2Model/Replay/Timeline.lean) 中的 `buildArchive vanillaEffectEnv initSt events keyframeStride viewer` 归档任意局内/局外事件，用 `seek` 跳回任意事件号、用 `forkTimeline` 在任意节点分叉重放替代事件后缀、用 `switchViewer` 切换检视玩家视角（`keyframe_seek_exact_equivalence`、`forkTimeline_exact_equivalence` 与 `viewer_switch_preserves_seek_and_checksum` 保证状态及 64 位 FNV-1a 校验和严格一致），同时每条 `TimedCombatHistoryEntry`（[History.lean](../Sts2Model/Replay/History.lean)）均自带精确 `stepIdx` 供下游任意查询；
+2. **自定义/长尾机制平滑接入**：在 [EffectIR.lean](../Sts2Model/Sim/EffectIR.lean) 中用纯代数 `EffectOp` 描述常规卡牌/药水/怪物 AI，对尚未手写建模的 Mod 事件或复杂特殊效果，直接插入 `TimelineEventKind.opaqueStep`（携带 `OpaqueStateDelta`）实现混合无头重放；
+3. **如何作为独立下游项目构建特定分析器（参考示例）**：具体业务层的分析与求解（例如局后迟打易伤扫描 `analyzeMissedVulnerable`、针对敌我总血量的 `branchCounterfactual`、有限步联机斩杀搜索 `findLethalActionOrder` 及专属案例见证定理 `late_vulnerable_counterfactual_witness`）并未硬编码进核心库，而是作为**独立的下游参考项目**放置在 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) 中展示写法（可运行 `lake exe sts2sim --timeline-demo` 查看演示报告）。你在开发自己的 Mod 分析工具时，直接参照该文件在独立项目/命名空间内调用核心公共 API 即可。
 
 ---
 
