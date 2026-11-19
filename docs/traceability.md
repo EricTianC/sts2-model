@@ -3,7 +3,7 @@
 本文档记录 `sts2_ideal` 项目中每个 Lean 4 模型、定理、静态目录提取脚本及 `.NET 9` 差分测试预言机与反编译 C# 参考源码（`reference/sts2/`，解压自 `sts2.zip`）的精确对应关系。
 
 - **Lean 工具链**: `leanprover/lean4:v4.36.0`（纯 `Std`，零 `Mathlib`）
-- **可信核保证**: 全项目 `Sts2Model/` 与 `Sts2Sim/` 共 **13,178 行** Lean 代码，**0 `sorry`**、**0 `axiom`**、**0 `native_decide`**
+- **可信核保证**: 全项目 `Sts2Model/` 与 `Sts2Sim/` 共 **14,927 行** Lean 代码，**0 `sorry`**、**0 `axiom`**、**0 `native_decide`**
 - **核心边界保证**: 核心 `Sts2Model/` 不含特定复盘启发式或求解算法，且绝不 `import Sts2Model.Examples.*`；具体下游工具示例如 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) 严格建构在核心公开 API 之上
 - **差分验证工具**: `.NET 9` (`net9.0`，零第三方 NuGet 包) + `uv run python`（仅使用 Python 标准库）
 
@@ -62,6 +62,7 @@
 | [Sts2Model/Sim/EffectIR.lean](../Sts2Model/Sim/EffectIR.lean) | 脱机无 UI 效果 DSL（抽象自 `Cards/*.cs`, `Potions/*.cs`, `Monsters/*.cs`） | 闭环纯函数效果解释器（`execPlayCardHeadless`、`execUsePotionHeadless`、`execEnemyTurnHeadless`）与长尾 `OpaqueStateDelta` 黑盒步进 |
 | [Sts2Model/Sim/VanillaEffects.lean](../Sts2Model/Sim/VanillaEffects.lean) | `Core.Models.{Powers,Cards,Potions,Monsters}/*.cs` Tier-1 核心子集 | 11 种核心 Power 模板、20+ 高频卡牌、`FIRE_POTION` 等药水及 `COOP_GUARDIAN` / `CULTIST` 多回合 AI 蓝图 |
 | [Sts2Model/Replay/Timeline.lean](../Sts2Model/Replay/Timeline.lean) | `Core.Multiplayer.Replay/{CombatReplay,CombatReplayEvent,CombatReplayEventType,CombatReplayWriter}.cs`, `ChecksumTracker.cs` | 统一时间线事件流、`buildArchive` 关键帧归档、随机定位 `seek`、通用分叉 `forkTimeline`、纯内核可归约 64 位 FNV-1a 状态校验和 (`computeStateChecksum`) 与视角切换 `switchViewer` |
+| [Sts2Model/Replay/TraceCodec.lean](../Sts2Model/Replay/TraceCodec.lean) | `NetFullCombatState.cs`, `CombatReplayEvent.cs`, `ChecksumTracker.cs` | 版本化外部 JSON 线协议 (`schemaVersion = 1`)、防截断 64 位十进制字符串序列化、宽容 `FromJson`、全量事件/状态编码解码、`verifyTraceChecksums` 审计与 `inspectArchiveStep` 无头步检视 |
 
 ### 1.6 `Sts2Model/Mechanics/` 角色核心机制层
 
@@ -92,13 +93,13 @@
 | [Sts2Model/Catalog/Verify.lean](../Sts2Model/Catalog/Verify.lean) | 纯 Lean 4 内核目录证明 | 自动生成：精确数量定理、ID 严格递增 + `Nodup` 定理（零 `native_decide`）与 `lookupCard`/`lookupRelic`/`lookupPower` |
 | [Sts2Model/Examples/VanillaShowcase.lean](../Sts2Model/Examples/VanillaShowcase.lean) | 30 个原版核心规则验证用例 | 覆盖伤害/格挡、Osty/Doom、Forge/SovereignBlade、Orb/Dark/Glass、Fool 箭矢与旋律、RNG 洗牌、地图/稀有度保底等 |
 | [Sts2Model/Examples/ModTemplates.lean](../Sts2Model/Examples/ModTemplates.lean) | 4 个 Mod 开发者模板与安全证明 | `modBloodthirst`（Power）、`modAegisWard`（Relic）、`modStarStrike`（Card）、`modComposition`（组合安全性） |
-| [Sts2Model/Examples/TimelineShowcase.lean](../Sts2Model/Examples/TimelineShowcase.lean) | 6 个核心时间线引擎验证用例 | `allTimelineTests`（并发排队、早发唤醒、Seek 等价、视角切换、药水+怪物 AI、`OpaqueStateDelta`） |
+| [Sts2Model/Examples/TimelineShowcase.lean](../Sts2Model/Examples/TimelineShowcase.lean) | 10 个核心时间线与编解码验证用例 | `allTimelineTests`（并发排队、早发唤醒、Seek 等价、视角切换、药水+怪物 AI、`OpaqueStateDelta`、`forkTimeline`、`TraceCodec` 往返/版本拒斥/篡改检出） |
 | [Sts2Model/Examples/ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) | **[非核心] 独立下游参考示例项目** | 演示如何仅调用公开核心 API 构建迟打易伤分析 `analyzeMissedVulnerable`、`branchCounterfactual`、`findLethalActionOrder`、2 项可运行校验与 CLI 演示 `runLateVulnerableDemo` |
-| [Sts2Sim/Main.lean](../Sts2Sim/Main.lean) | CLI 仿真器与差分测试入口 (`lake exe sts2sim`) | 默认运行 45 项内置断言测试；`--timeline-demo` 打印下游时间线演示；`--diff <input.tsv>` 运行 11 类原版语义差分测试预言机响应 |
+| [Sts2Sim/Main.lean](../Sts2Sim/Main.lean) | CLI 仿真器与差分测试入口 (`lake exe sts2sim`) | 默认运行 49 项内置断言测试；`--timeline-demo`、`--export-sample-trace`、`--inspect`；`--diff <input.tsv>` 运行 12 类差分测试预言机响应 |
 | [DiffTest/Sts2Oracle/Sts2Oracle.csproj](../DiffTest/Sts2Oracle/Sts2Oracle.csproj) | `.NET 9` 对拍项目配置 | `net9.0`，零第三方依赖 |
-| [DiffTest/Sts2Oracle/Program.cs](../DiffTest/Sts2Oracle/Program.cs) | `reference/sts2/` C# 语义直译对拍程序 | 按行解析 `--diff <input.tsv>`，执行原生 C# `ulong` / `decimal` / `float` / `StringComparison.Ordinal` / `ActionQueueSet` / FNV-1a 校验和计算 |
+| [DiffTest/Sts2Oracle/Program.cs](../DiffTest/Sts2Oracle/Program.cs) | `reference/sts2/` C# 语义直译对拍程序 | 按行解析 `--diff <input.tsv>`，支持 `--export-sample-trace` 与 `--verify-trace`，执行原生 C# `System.Text.Json` / `ulong` / `decimal` / `float` / FNV-1a 验证 |
 | [scripts/extract_catalog.py](../scripts/extract_catalog.py) | 方案 C 静态目录提取脚本 (`uv run python`) | 扫描 `reference/sts2/` 生成 `Cards.lean` / `Relics.lean` / `Powers.lean` / `Verify.lean` |
-| [scripts/run_diff_test.py](../scripts/run_diff_test.py) | `.NET 9` ↔ Lean 4 自动对拍脚本 (`uv run python`) | 生成 11 族共 790 条确定性 + 对抗性边界测试向量，逐条对比两套实现输出 |
+| [scripts/run_diff_test.py](../scripts/run_diff_test.py) | `.NET 9` ↔ Lean 4 自动对拍脚本 (`uv run python`) | 生成 12 族共 850 条确定性 + 对抗性边界测试向量并执行 C# ↔ Lean 双向 JSON Trace 文件交接验证 |
 
 ---
 
@@ -232,10 +233,13 @@
 | `actionQueueSet_early_resume_buffered_and_applied` | 早于 `pauseActionForPlayerChoice` 到达的 `resumeAction` 会进入 `waitingForResumption` 并在暂停时立即消费赋值并转为 `readyToResumeExecuting` |
 | `replayEvents_nil` / `replayEvents_append` | 空时间线恒等律与分段事件重放的结合律 (`foldl_append`) |
 | `list_take_split` | 前缀切片等价引理（用于将全量重放拆分为关键帧前缀与增量切片） |
-| `buildArchive_validKeyframes` | 由 `buildArchive` 生成的任一时间线归档恒满足 `ValidKeyframes` 不变量 |
+| `buildArchive_validKeyframes` | 由 `buildArchive` 生成的任一时间线归档恒满足 `ValidKeyframes` 不变量（含精确前缀状态与 64 位 FNV-1a 校验和） |
 | `keyframe_seek_exact_equivalence` | 在 `ValidKeyframes` 条件下，从最近关键帧 `seek env archive k` 恢复与增量执行严格等于从事件 `0` 全量重放 `events.take k` |
 | `forkTimeline_exact_equivalence` | 在 `ValidKeyframes` 条件下，`forkTimeline env archive branchIdx altEvents` 严格等价于从事件 `0` 重放 `events.take branchIdx ++ altEvents` |
 | `viewer_switch_preserves_seek_and_checksum` | `switchViewer` 切换检视玩家视角后，任意步 `seek` 状态及 64 位 FNV-1a 状态校验和完全不变 |
+| `decodeChoiceResult_encodeChoiceResult` / `decodeActionPayload_encodeActionPayload` / `decodeCombatReplayEvent_encodeCombatReplayEvent` / `decodeOutOfCombatSync_encodeOutOfCombatSync` / `decodeOpaqueDelta_encodeOpaqueDelta` / `decodeTimelineEvent_encodeTimelineEvent` | 外部 JSON Trace 线协议对全部 `ChoiceResult`、`ReplayActionPayload` (11 类)、`CombatReplayEvent`、`OutOfCombatSyncEvent` (8 类)、`OpaqueStateDelta` 与 `TimelineEvent` 满足零损双向可逆 (`decode (encode x) = .ok x`) |
+| `decodeArchiveBundle_rejects_bad_version` | 当输入 Trace `schemaVersion ≠ traceSchemaVersion (= 1)` 时解码必定安全拒绝 (`isOk = false`) |
+| `verifyTraceChecksums_of_validKeyframes` | 任意满足 `ValidKeyframes` 的时间线归档经 `verifyTraceChecksums` 审计自身导出关键帧列表时必返回 `allMatched = true` |
 
 ### 2.10 静态目录、钩子目录、历史数量与 Mod / 下游示例定理
 
@@ -269,7 +273,7 @@
 
 ## 4. `.NET 9` ↔ Lean 4 差分对拍覆盖与关键发现
 
-由 [scripts/run_diff_test.py](../scripts/run_diff_test.py) 自动生成 **790 条**向量并同时喂给 `sts2sim --diff` 与 `dotnet .../Sts2Oracle.dll --diff`，逐行比对全部 11 个原版确定性语义家族：
+由 [scripts/run_diff_test.py](../scripts/run_diff_test.py) 自动生成 **850 条**向量并同时喂给 `sts2sim --diff` 与 `dotnet .../Sts2Oracle.dll --diff`，逐行比对全部 12 个确定性语义家族，并在最后自动执行 **C# ↔ Lean 双向 JSON Trace 文件交接验证 (`PASS`)**：
 
 | 族 ID | 向量数 | 对拍目标与精度要求 |
 |---|---:|---|
@@ -284,7 +288,8 @@
 | `MOD_SORT` | 45 | `ModHelper` 战斗钩子按 Ordinal 字典序排序并去重（大小写敏感、`a9`/`A9`/`com.A`/`com.1` 边界） |
 | `QUEUE_SET` | 60 | 多玩家并发 `ActionQueueSet`（入队取消守护、min-ID `getReadyAction`、`pauseActionForPlayerChoice` 仅阻断持有者、早发 `resumeAction` 缓冲、停战清理） |
 | `TIMELINE_SEEK` | 60 | 双人协作多回合无头回放（出牌 + 药水 + 跨回合 `Rng.unstableShuffle` 重洗 + `COOP_GUARDIAN` AI + 关键帧 `seek` + 64 位 FNV-1a 状态校验和位一致） |
-| **合计** | **790** | **当前对拍结果：790/790 完全一致（0 Mismatches）** |
+| `TRACE_JSON` | 60 | `schemaVersion = 1` 外部 JSON 线协议（`> 2^53` 全 64 位字符串 `runSeed`、`CULTIST` / `COOP_GUARDIAN` 多回合、`Artifact` / 药水 / 局外 `runSync` / `opaqueStep` 与双向序列化回放 FNV-1a 一致性） |
+| **合计** | **850** | **当前对拍结果：850/850 完全一致（0 Mismatches）+ 双向 JSON 文件交接 `PASS`** |
 
 ### 差分测试捕获的真实语义边界示例（`CARD_COST` #505 / #513）
 

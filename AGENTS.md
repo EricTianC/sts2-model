@@ -47,16 +47,16 @@
 | `Sts2Model/Combat/` | 多人确定性 `GameAction` 队列、`MonsterAI` 无环状态机、`TurnLoop` (`CombatManager`) |
 | `Sts2Model/Multiplayer/` | 多人并发 `ActionQueueSet`（分玩家队列、选牌暂停/唤醒、取消标志）与 `PlayerChoiceSynchronizer` |
 | `Sts2Model/Sim/` | 无 UI 效果原语解释器 (`EffectIR`)、`OpaqueStateDelta` 回退与 Tier-1 原版内容 (`VanillaEffects`) |
-| `Sts2Model/Replay/` | 全 18+9 语义历史与通用步索引记录 (`History` 含 `TimedCombatHistoryEntry`)、关键帧 Seek / 通用分叉 `forkTimeline` 与 64 位 FNV-1a 校验和 (`Timeline`) |
+| `Sts2Model/Replay/` | 全 18+9 语义历史 (`History` 含 `TimedCombatHistoryEntry`)、关键帧 Seek / `forkTimeline` 与 64 位 FNV-1a (`Timeline`)、版本化外部 Trace JSON 线协议 (`TraceCodec`) |
 | `Sts2Model/Mechanics/` | `Orbs` (Defect)、`Necrobinder` (Osty / Doom)、`Regent` (Stars / Forge)、`Fool` (Arrow / Melody)、`Dread` |
 | `Sts2Model/Run/` | `ActMap` DAG、`CardRarityOdds` / `UnknownMapPointOdds` / `RelicGrabBag`、`RunLoop` |
 | `Sts2Model/Catalog/` | 由 `scripts/extract_catalog.py` 自动生成的 `Cards` (717) / `Relics` (316) / `Powers` (304) 与 `Verify.lean` |
 | `Sts2Model/Proofs/` | 9 个形式化证明模块：`DamagePipeline`、`HookSafety`、`CardPiles`、`PowerSystem`、`TurnMachine`、`Determinism`、`Mechanics`、`MapTopology`、`ReplayTimeline` |
-| `Sts2Model/Examples/` | `VanillaShowcase.lean`（30 个原版规则）、`ModTemplates.lean`（4 个 Mod 模板）、`TimelineShowcase.lean`（6 个通用时间线引擎验证），以及独立下游示例 `ReplayAnalyzerExample.lean`（2 项复盘/求解示例 + `--timeline-demo`） |
+| `Sts2Model/Examples/` | `VanillaShowcase.lean`（30 个原版规则）、`ModTemplates.lean`（4 个 Mod 模板）、`TimelineShowcase.lean`（10 个通用时间线与 `TraceCodec` 验证），以及独立下游示例 `ReplayAnalyzerExample.lean`（2 项复盘/求解示例 + `--timeline-demo`） |
 | `Sts2Model.lean` | 公共伞形导出模块；新增 `Sts2Model/**/*.lean` 后必须同步在此 `import` |
-| `Sts2Sim/Main.lean` | `lake exe sts2sim` 默认回归测试入口（45 项断言）、`--timeline-demo` 与 `--diff <tsv>` 对拍服务端 |
-| `DiffTest/Sts2Oracle/` | `.NET 9` C# 直译参考预言机（`Sts2Oracle.csproj`、`Program.cs`） |
-| `scripts/` | `extract_catalog.py`（静态目录抽取）与 `run_diff_test.py`（11 族 790 向量差分对拍） |
+| `Sts2Sim/Main.lean` | `lake exe sts2sim` 回归测试（49 项断言）、`--timeline-demo`、`--export-sample-trace`、`--inspect` 及 `--diff <tsv>` 对拍服务端 |
+| `DiffTest/Sts2Oracle/` | `.NET 9` C# 直译参考预言机（`Sts2Oracle.csproj`、`Program.cs`，含 `--diff`、`--export-sample-trace`、`--verify-trace`） |
+| `scripts/` | `extract_catalog.py`（静态目录抽取）与 `run_diff_test.py`（12 族 850 向量差分对拍 + 双向 JSON 文件交接验证） |
 | `docs/` | `traceability.md`（源码溯源与定理全表）与 `modder_guide.md`（Mod 开发者建模指南） |
 
 ---
@@ -94,11 +94,13 @@ import Sts2Model
 #print axioms Sts2Model.Catalog.allCards_nodup
 EOF
 
-# 4. 运行 45 项可执行回归测试与无 UI 时间线演示
+# 4. 运行 49 项可执行回归测试、无 UI 演示与外部 JSON Trace 检视
 lake exe sts2sim
 lake exe sts2sim --timeline-demo
+lake exe sts2sim --export-sample-trace /tmp/sample_trace.json
+lake exe sts2sim --inspect /tmp/sample_trace.json --verify --viewer 2 --seek 2
 
-# 5. 构建 .NET 9 对拍预言机并执行 11 族 790 向量差分测试
+# 5. 构建 .NET 9 对拍预言机并执行 12 族 850 向量差分测试 + 双向 JSON 文件交接验证
 dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo
 uv run python scripts/run_diff_test.py
 
@@ -114,7 +116,7 @@ uv run python scripts/extract_catalog.py
 
 - **改逻辑必同步**：
   1. 新增 `Sts2Model/` 子模块时同步更新 `Sts2Model.lean`；
-  2. 修改或新增规则/不变量时同步补齐 `Sts2Model/Proofs/` 定理、`Sts2Sim/Main.lean` / `Examples/` 用例，以及（若属 11 大核心语义家族或新原版家族）`DiffTest/Sts2Oracle/Program.cs` + `scripts/run_diff_test.py`；
+  2. 修改或新增规则/不变量时同步补齐 `Sts2Model/Proofs/` 定理、`Sts2Sim/Main.lean` / `Examples/` 用例，以及（若属 12 大核心语义家族或新原版家族）`DiffTest/Sts2Oracle/Program.cs` + `scripts/run_diff_test.py`；
   3. 确保 `fnv1aString` 保持纯内核可归约（避免使用不可在 Lean 内核 `decide` 展开的 `@[extern]` `ByteArray` 函数）并与 `.NET 9` `ComputeTimelineChecksum` 位精确同步；
   4. 更新目录脚本、定理名、计数或对拍覆盖面后同步刷新 `docs/traceability.md`、`docs/modder_guide.md` 与 `README.md`。
 - **提交风格**：采用常规语义化前缀与作用域（如 `chore:`、`feat(core,model):`、`feat(engine):`、`feat(catalog):`、`feat(proofs,examples):`、`test(sim,difftest):`、`docs:`），按逻辑层做原子提交；每次提交前确认 `git status` 不含 `reference/`、`sts2.zip`、`.lake/` 或 `.NET` 编译产物。

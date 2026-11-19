@@ -16,13 +16,13 @@ sts2_ideal/
 │   ├── Combat/      # GameAction 队列、MonsterAI 状态机、TurnLoop 回合控制
 │   ├── Multiplayer/ # 多玩家并发 ActionQueueSet 与 PlayerChoiceSynchronizer
 │   ├── Sim/         # 无 UI EffectIR 解释器、OpaqueStateDelta 与 Tier-1 原版内容
-│   ├── Replay/      # 18+9 语义历史与通用步索引、关键帧 Seek / forkTimeline 分叉原语 / FNV-1a
+│   ├── Replay/      # 18+9 语义历史与通用步索引、关键帧 Seek / forkTimeline 分叉原语 / FNV-1a、外部 JSON Trace 线协议 (TraceCodec)
 │   ├── Mechanics/   # Orbs、Necrobinder (Osty/Doom)、Regent (Stars/Forge)、Fool (Arrow/Melody)、Dread
 │   ├── Run/         # ActMap DAG、CardRarityOdds / UnknownMapPointOdds / RelicGrabBag、RunLoop
 │   ├── Catalog/     # 从 reference/sts2/ 自动抽取的 717 Cards / 316 Relics / 304 Powers 与核证明
 │   ├── Examples/    # 核心演示 (`VanillaShowcase`/`ModTemplates`/`TimelineShowcase`) 与独立下游示例 (`ReplayAnalyzerExample`)
 │   └── Proofs/      # 9 个主题定理证明模块（全项目零 sorry / zero axiom / zero native_decide）
-├── Sts2Sim/         # 可执行验证入口 (`lake exe sts2sim`、`--timeline-demo`、`--diff`)
+├── Sts2Sim/         # 可执行验证入口 (`lake exe sts2sim`、`--timeline-demo`、`--export-sample-trace`、`--inspect`、`--diff`)
 ├── DiffTest/        # .NET 9 C# 对拍预言机 (`Sts2Oracle`, 零第三方依赖)
 ├── scripts/         # `extract_catalog.py` 与 `run_diff_test.py` (`uv run python`)
 └── docs/            # 溯源矩阵 (`traceability.md`) 与本开发指南 (`modder_guide.md`)
@@ -42,11 +42,13 @@ sts2_ideal/
 # 1. 编译全量 Lean 模型与证明
 lake build
 
-# 2. 运行全部 45 项内置可执行测试及脱机时间线反事实演示
+# 2. 运行全部 49 项内置可执行测试、外部 JSON 审计及脱机时间线演示
 lake exe sts2sim
 lake exe sts2sim --timeline-demo
+lake exe sts2sim --export-sample-trace /tmp/sample_trace.json
+lake exe sts2sim --inspect /tmp/sample_trace.json --verify --viewer 2 --seek 2
 
-# 3. 编译 .NET 9 对拍预言机并执行 11 族 790 条跨语言差分测试
+# 3. 编译 .NET 9 对拍预言机并执行 12 族 850 条跨语言差分测试 + 双向 JSON 交接验证
 dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo
 uv run python scripts/run_diff_test.py
 
@@ -121,7 +123,12 @@ Regent 风格的费星双资源攻击牌 `modStarStrikeCardId`（由 `mkModStarS
 如果你在编写**多人复盘时间线 Mod**、**对局分析工具**或需要在脱离 Godot UI/动画的无头环境中做反事实推演，核心库已经为你准备好通用基础设施，无需自己重造协议轮子（核心用法见 [TimelineShowcase.lean](../Sts2Model/Examples/TimelineShowcase.lean)）：
 1. **关键帧归档、随机跳转与通用分叉原语**：使用 [Timeline.lean](../Sts2Model/Replay/Timeline.lean) 中的 `buildArchive vanillaEffectEnv initSt events keyframeStride viewer` 归档任意局内/局外事件，用 `seek` 跳回任意事件号、用 `forkTimeline` 在任意节点分叉重放替代事件后缀、用 `switchViewer` 切换检视玩家视角（`keyframe_seek_exact_equivalence`、`forkTimeline_exact_equivalence` 与 `viewer_switch_preserves_seek_and_checksum` 保证状态及 64 位 FNV-1a 校验和严格一致），同时每条 `TimedCombatHistoryEntry`（[History.lean](../Sts2Model/Replay/History.lean)）均自带精确 `stepIdx` 供下游任意查询；
 2. **自定义/长尾机制平滑接入**：在 [EffectIR.lean](../Sts2Model/Sim/EffectIR.lean) 中用纯代数 `EffectOp` 描述常规卡牌/药水/怪物 AI，对尚未手写建模的 Mod 事件或复杂特殊效果，直接插入 `TimelineEventKind.opaqueStep`（携带 `OpaqueStateDelta`）实现混合无头重放；
-3. **如何作为独立下游项目构建特定分析器（参考示例）**：具体业务层的分析与求解（例如局后迟打易伤扫描 `analyzeMissedVulnerable`、针对敌我总血量的 `branchCounterfactual`、有限步联机斩杀搜索 `findLethalActionOrder` 及专属案例见证定理 `late_vulnerable_counterfactual_witness`）并未硬编码进核心库，而是作为**独立的下游参考项目**放置在 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) 中展示写法（可运行 `lake exe sts2sim --timeline-demo` 查看演示报告）。你在开发自己的 Mod 分析工具时，直接参照该文件在独立项目/命名空间内调用核心公共 API 即可。
+3. **版本化外部 JSON Trace 线协议（实机 Mod ↔ Lean 无缝对接）**：通过 [TraceCodec.lean](../Sts2Model/Replay/TraceCodec.lean)（`schemaVersion = 1`），游戏内 `.NET 9` C# 录制 Mod 可把 `WireTraceBundle` 导出为 JSON（所有 64 位无符号整数 `runSeed`、`rng.s0..s3`、`checksum` 均以十进制字符串编码避免双精度浮点 `2^53` 截断，并由 [ReplayTimeline.lean](../Sts2Model/Proofs/ReplayTimeline.lean) 证明事件层双向无损与关键帧审计完备性），随后在命令行直接执行：
+   ```bash
+   lake exe sts2sim --inspect match_trace.json --verify --viewer 2 --seek 3
+   ```
+   即可在脱离 Godot/游戏本体的纯命令行中校验全部关键帧 FNV-1a 校验和、切换检视视角并跳转检查任意一步完整状态；
+4. **如何作为独立下游项目构建特定分析器（参考示例）**：具体业务层的分析与求解（例如局后迟打易伤扫描 `analyzeMissedVulnerable`、针对敌我总血量的 `branchCounterfactual`、有限步联机斩杀搜索 `findLethalActionOrder` 及专属案例见证定理 `late_vulnerable_counterfactual_witness`）并未硬编码进核心库，而是作为**独立的下游参考项目**放置在 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) 中展示写法（可运行 `lake exe sts2sim --timeline-demo` 查看演示报告）。你在开发自己的 Mod 分析工具时，直接参照该文件在独立项目/命名空间内调用核心公共 API 即可。
 
 ---
 
