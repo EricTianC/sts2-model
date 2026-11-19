@@ -33,6 +33,7 @@ import Sts2Model.Replay.History
 import Sts2Model.Sim.EffectIR
 import Sts2Model.Sim.VanillaEffects
 import Sts2Model.Replay.Timeline
+import Sts2Model.Replay.TraceCodec
 
 import Sts2Model.Mechanics.Orbs
 import Sts2Model.Mechanics.Necrobinder

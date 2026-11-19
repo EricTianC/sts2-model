@@ -1,9 +1,10 @@
 /-
   Formal proofs for headless multiplayer replay, concurrent ActionQueueSet scheduling,
-  keyframe seek equivalence, timeline forking, and viewer-perspective invariance.
+  keyframe seek equivalence, timeline forking, viewer-perspective invariance,
+  and TraceCodec lossless encoding / checksum audit soundness.
   All theorems proved in Lean 4 kernel with zero `sorry`, zero `axiom`, zero `native_decide`.
 -/
-import Sts2Model.Replay.Timeline
+import Sts2Model.Replay.TraceCodec
 
 namespace Sts2Model.Proofs
 
@@ -210,20 +211,24 @@ theorem list_take_split {α : Type} :
       simpa [Nat.succ_sub_succ] using list_take_split j tl k (by omega)
 
 /-- Every keyframe stores the exact state produced by replaying from `initialState`
-    through its recorded prefix `events.take kf.eventIndex`. -/
+    through its recorded prefix `events.take kf.eventIndex`, along with its exact
+    64-bit FNV-1a checksum. -/
 def ValidKeyframes (env : EffectEnv) (archive : TimelineArchive) : Prop :=
   ∀ kf ∈ archive.keyframes,
     kf.eventIndex ≤ archive.events.length ∧
-    kf.state = replayEvents env archive.initialState (archive.events.take kf.eventIndex)
+    kf.state = replayEvents env archive.initialState (archive.events.take kf.eventIndex) ∧
+    kf.checksum = computeStateChecksum kf.state
 
 theorem buildKeyframesLoop_inv (env : EffectEnv) (init : TimelineState) (stride : Nat) :
     ∀ (rem pref : List TimelineEvent) (accKfs : List Keyframe),
       (∀ kf ∈ accKfs,
         kf.eventIndex ≤ pref.length ∧
-        kf.state = replayEvents env init ((pref ++ rem).take kf.eventIndex)) →
+        kf.state = replayEvents env init ((pref ++ rem).take kf.eventIndex) ∧
+        kf.checksum = computeStateChecksum kf.state) →
       ∀ kf ∈ buildKeyframesLoop env stride pref.length (replayEvents env init pref) rem accKfs,
         kf.eventIndex ≤ (pref ++ rem).length ∧
-        kf.state = replayEvents env init ((pref ++ rem).take kf.eventIndex)
+        kf.state = replayEvents env init ((pref ++ rem).take kf.eventIndex) ∧
+        kf.checksum = computeStateChecksum kf.state
   | [], pref, accKfs, hAcc => by
       simpa [buildKeyframesLoop] using hAcc
   | ev :: rest, pref, accKfs, hAcc => by
@@ -237,12 +242,13 @@ theorem buildKeyframesLoop_inv (env : EffectEnv) (init : TimelineState) (stride 
       have hPrevInv :
           ∀ kf ∈ accKfs,
             kf.eventIndex ≤ (pref ++ [ev]).length ∧
-            kf.state = replayEvents env init (((pref ++ [ev]) ++ rest).take kf.eventIndex) := by
+            kf.state = replayEvents env init (((pref ++ [ev]) ++ rest).take kf.eventIndex) ∧
+            kf.checksum = computeStateChecksum kf.state := by
         intro kf hmem
         have h1 := hAcc kf hmem
-        refine ⟨by simp; omega, ?_⟩
+        refine ⟨by simp; omega, ?_, h1.2.2⟩
         rw [← hAssoc]
-        exact h1.2
+        exact h1.2.1
       unfold buildKeyframesLoop
       dsimp only
       split
@@ -252,7 +258,8 @@ theorem buildKeyframesLoop_inv (env : EffectEnv) (init : TimelineState) (stride 
                  , state := replayStep env (replayEvents env init pref) ev
                  , checksum := computeStateChecksum (replayStep env (replayEvents env init pref) ev) }],
               kf.eventIndex ≤ (pref ++ [ev]).length ∧
-              kf.state = replayEvents env init (((pref ++ [ev]) ++ rest).take kf.eventIndex) := by
+              kf.state = replayEvents env init (((pref ++ [ev]) ++ rest).take kf.eventIndex) ∧
+              kf.checksum = computeStateChecksum kf.state := by
           intro kf hmem
           cases List.mem_append.mp hmem with
           | inl hOld => exact hPrevInv kf hOld
@@ -260,7 +267,7 @@ theorem buildKeyframesLoop_inv (env : EffectEnv) (init : TimelineState) (stride 
               simp only [List.mem_singleton] at hNew
               subst hNew
               dsimp only
-              refine ⟨by simp, ?_⟩
+              refine ⟨by simp, ?_, rfl⟩
               have hLen : (pref ++ [ev]).length = pref.length + 1 := by simp
               have hTake : ((pref ++ [ev]) ++ rest).take (pref.length + 1) = pref ++ [ev] := by
                 rw [← hLen]
@@ -297,7 +304,8 @@ theorem buildArchive_validKeyframes (env : EffectEnv) (init : TimelineState)
   have hBase :
       ∀ kf : Keyframe, kf ∈ [{ eventIndex := 0, state := init, checksum := computeStateChecksum init }] →
         kf.eventIndex ≤ ([] : List TimelineEvent).length ∧
-        kf.state = replayEvents env init (([] ++ evs).take kf.eventIndex) := by
+        kf.state = replayEvents env init (([] ++ evs).take kf.eventIndex) ∧
+        kf.checksum = computeStateChecksum kf.state := by
     intro kf hmem
     simp only [List.mem_singleton] at hmem
     subst hmem
@@ -350,7 +358,7 @@ theorem keyframe_seek_exact_equivalence (env : EffectEnv) (archive : TimelineArc
         archive.keyframes none (fun y hy => hy) (fun _ h => nomatch h) kf hNearest
       have hV := hValid kf hSpec.1
       have hKfState : kf.state = replayEvents env archive.initialState (archive.events.take kf.eventIndex) :=
-        hV.2
+        hV.2.1
       have hKfLeK : kf.eventIndex ≤ k := hSpec.2
       dsimp only
       rw [hKfState, ← replayEvents_append, ← list_take_split kf.eventIndex archive.events k hKfLeK]
@@ -371,5 +379,156 @@ theorem viewer_switch_preserves_seek_and_checksum (env : EffectEnv) (archive : T
     computeStateChecksum (seek env (switchViewer archive v) k) =
       computeStateChecksum (seek env archive k) :=
   ⟨rfl, rfl⟩
+
+-- ============================================================================
+-- 3. TraceCodec Lossless Roundtrip & Checksum Audit Soundness
+-- ============================================================================
+
+theorem decodeCombatSide_encodeCombatSide (s : CombatSide) :
+    decodeCombatSide (encodeCombatSide s) = .ok s := by
+  cases s <;> rfl
+
+theorem decodeRelicRarity_encodeRelicRarity (r : RelicRarity) :
+    decodeRelicRarity (encodeRelicRarity r) = .ok r := by
+  cases r <;> rfl
+
+theorem decodeRoomType_encodeRoomType (r : RoomType) :
+    decodeRoomType (encodeRoomType r) = .ok r := by
+  cases r <;> rfl
+
+theorem decodeMapPointType_encodeMapPointType (p : MapPointType) :
+    decodeMapPointType (encodeMapPointType p) = .ok p := by
+  cases p <;> rfl
+
+theorem decodeCombatReplayEventType_encodeCombatReplayEventType (t : CombatReplayEventType) :
+    decodeCombatReplayEventType (encodeCombatReplayEventType t) = .ok t := by
+  cases t <;> rfl
+
+theorem decodeChoiceResult_encodeChoiceResult (cr : ChoiceResult) :
+    decodeChoiceResult (encodeChoiceResult cr) = .ok cr := by
+  cases cr <;> rfl
+
+theorem decodeActionPayload_encodeActionPayload (pl : ReplayActionPayload) :
+    decodeActionPayload (encodeActionPayload pl) = .ok pl := by
+  cases pl <;> simp [encodeActionPayload, decodeActionPayload, encodeModelId, decodeModelId]
+
+theorem decodeCombatReplayEvent_encodeCombatReplayEvent (ce : CombatReplayEvent) :
+    decodeCombatReplayEvent (encodeCombatReplayEvent ce) = .ok ce := by
+  cases ce with
+  | mk et pid pl hid aid cid cr =>
+      unfold encodeCombatReplayEvent decodeCombatReplayEvent
+      simp only [decodeCombatReplayEventType_encodeCombatReplayEventType]
+      cases pl <;> cases cr <;>
+        simp [Option.map, decodeActionPayload_encodeActionPayload, decodeChoiceResult_encodeChoiceResult] <;>
+        rfl
+
+theorem decodeOutOfCombatSync_encodeOutOfCombatSync (se : OutOfCombatSyncEvent) :
+    decodeOutOfCombatSync (encodeOutOfCombatSync se) = .ok se := by
+  cases se with
+  | mapMove row col pt rt =>
+      simp [encodeOutOfCombatSync, decodeOutOfCombatSync,
+        decodeMapPointType_encodeMapPointType, decodeRoomType_encodeRoomType]
+      rfl
+  | merchantBuy cardOpt cost =>
+      cases cardOpt <;>
+        simp [encodeOutOfCombatSync, decodeOutOfCombatSync, encodeModelId, decodeModelId]
+  | rewardPick cardOpt gain =>
+      cases cardOpt <;>
+        simp [encodeOutOfCombatSync, decodeOutOfCombatSync, encodeModelId, decodeModelId]
+  | treasureRelicPick rid rar =>
+      cases rid
+      simp [encodeOutOfCombatSync, decodeOutOfCombatSync, encodeModelId, decodeModelId,
+        decodeRelicRarity_encodeRelicRarity]
+      rfl
+  | _ => rfl
+
+private theorem list_map_idPair_roundtrip (xs : List (Nat × Int)) :
+    xs.map (fun p => (p.1, p.2)) = xs := by
+  induction xs with
+  | nil => rfl
+  | cons hd tl ih => simp [ih]
+
+private theorem list_map_powerDelta_roundtrip (xs : List (CreatureId × ModelId × Int)) :
+    xs.map (fun p => (p.1, ({ category := p.2.1.category, entry := p.2.1.entry } : ModelId), p.2.2)) = xs := by
+  induction xs with
+  | nil => rfl
+  | cons hd tl ih =>
+      rcases hd with ⟨cid, mid, amt⟩
+      cases mid
+      simp [ih]
+
+theorem decodeOpaqueDelta_encodeOpaqueDelta (d : OpaqueStateDelta) :
+    decodeOpaqueDelta (encodeOpaqueDelta d) = .ok d := by
+  cases d with
+  | mk lbl hp blk pow eng strs =>
+      simp only [encodeOpaqueDelta, decodeOpaqueDelta, List.map_map]
+      simp [Function.comp_def, list_map_idPair_roundtrip, list_map_powerDelta_roundtrip]
+
+theorem decodeTimelineEvent_encodeTimelineEvent (ev : TimelineEvent) :
+    decodeTimelineEvent (encodeTimelineEvent ev) = .ok ev := by
+  cases ev with
+  | mk seq act fl rn ap kind =>
+      cases kind with
+      | combat ce =>
+          simp [encodeTimelineEvent, decodeTimelineEvent, decodeCombatReplayEvent_encodeCombatReplayEvent]
+          rfl
+      | pauseActionForChoice aid opts =>
+          cases opts
+          rfl
+      | endRoundAndRunEnemies =>
+          rfl
+      | runSync rEv =>
+          simp [encodeTimelineEvent, decodeTimelineEvent, decodeOutOfCombatSync_encodeOutOfCombatSync]
+          rfl
+      | opaqueStep d =>
+          simp [encodeTimelineEvent, decodeTimelineEvent, decodeOpaqueDelta_encodeOpaqueDelta]
+          rfl
+
+theorem decodeArchiveBundle_rejects_bad_version (env : EffectEnv) (b : WireTraceBundle)
+    (hBad : b.schemaVersion ≠ traceSchemaVersion) :
+    (decodeArchiveBundle env b).isOk = false := by
+  unfold decodeArchiveBundle
+  have hNe : (b.schemaVersion != traceSchemaVersion) = true := bne_iff_ne.mpr hBad
+  simp [hNe, Except.isOk, Except.toBool]
+
+private theorem filterMap_checksum_eq_nil (env : EffectEnv) (archive : TimelineArchive)
+    (entries : List WireChecksumEntry)
+    (hMatch : ∀ ent ∈ entries,
+      uInt64ToStr (computeStateChecksum (seek env archive ent.eventIndex)) = ent.checksum) :
+    entries.filterMap (fun ent =>
+      let act := uInt64ToStr (computeStateChecksum (seek env archive ent.eventIndex))
+      if act == ent.checksum then none
+      else some ({ eventIndex := ent.eventIndex, expected := ent.checksum, actual := act } : ChecksumMismatch)) = [] := by
+  induction entries with
+  | nil => rfl
+  | cons hd tl ih =>
+      have hHd := hMatch hd (List.mem_cons_self ..)
+      have hTl : ∀ ent ∈ tl,
+          uInt64ToStr (computeStateChecksum (seek env archive ent.eventIndex)) = ent.checksum :=
+        fun ent hmem => hMatch ent (List.mem_cons_of_mem hd hmem)
+      simp only [List.filterMap_cons, hHd, beq_self_eq_true, ↓reduceIte]
+      exact ih hTl
+
+/-- If an archive satisfies `ValidKeyframes`, auditing its own serialized keyframe
+    checksums via `verifyTraceChecksums` unconditionally succeeds (`allMatched = true`). -/
+theorem verifyTraceChecksums_of_validKeyframes (env : EffectEnv) (archive : TimelineArchive)
+    (hValid : ValidKeyframes env archive) :
+    (verifyTraceChecksums env archive
+      (archive.keyframes.map fun kf =>
+        { eventIndex := kf.eventIndex, checksum := uInt64ToStr kf.checksum })).allMatched = true := by
+  unfold verifyTraceChecksums
+  dsimp only
+  have hMatch :
+      ∀ ent ∈ (archive.keyframes.map fun kf =>
+          ({ eventIndex := kf.eventIndex, checksum := uInt64ToStr kf.checksum } : WireChecksumEntry)),
+        uInt64ToStr (computeStateChecksum (seek env archive ent.eventIndex)) = ent.checksum := by
+    intro ent hmem
+    rcases List.mem_map.mp hmem with ⟨kf, hkfMem, hkfEq⟩
+    subst hkfEq
+    have hV := hValid kf hkfMem
+    have hSeek := keyframe_seek_exact_equivalence env archive hValid kf.eventIndex
+    rw [hSeek, ← hV.2.1, ← hV.2.2]
+  rw [filterMap_checksum_eq_nil env archive _ hMatch]
+  rfl
 
 end Sts2Model.Proofs
