@@ -11,6 +11,8 @@ import Sts2Model.Command.CreatureCmd
 import Sts2Model.Command.CardCmd
 import Sts2Model.Command.PowerCmd
 import Sts2Model.Combat.GameAction
+import Sts2Model.Mechanics.Orbs
+import Sts2Model.Mechanics.Necrobinder
 
 namespace Sts2Model.Combat
 
@@ -18,6 +20,7 @@ open Sts2Model.Core
 open Sts2Model.Model
 open Sts2Model.Hook
 open Sts2Model.Command
+open Sts2Model.Mechanics
 
 /-- Outcome of checking win/loss condition in `CombatManager.CheckWinCondition`. -/
 inductive CombatOutcome where
@@ -97,7 +100,7 @@ def setupPlayerTurn (cs : CombatState) (reg : BehaviorRegistry) (pid : PlayerId)
     (baseDraw : Nat := 5) (modSubscribers : List (ModId × ModelId) := []) : CombatState :=
   match cs.findPlayer pid with
   | none => cs
-  | some _ =>
+  | some original =>
       if !cs.isInProgress then cs
       else
         let cs1 := setPlayerPhase cs pid .start
@@ -105,9 +108,23 @@ def setupPlayerTurn (cs : CombatState) (reg : BehaviorRegistry) (pid : PlayerId)
           match p.combatState with
           | none => p
           | some pcs =>
-              let energy' := if shouldPlayerResetEnergy cs1 reg p modSubscribers then pcs.baseMaxEnergy else pcs.energy
+              let energy' := if shouldPlayerResetEnergy cs1 reg p modSubscribers then pcs.baseMaxEnergy
+                             else (pcs.gainEnergy pcs.baseMaxEnergy).energy
               { p with combatState := some { pcs with energy := energy', playedTagsThisTurn := [] } }
-        let (cs3, _) := drawCards cs2 reg pid baseDraw true modSubscribers
+        let (beforeDraw, draws) :=
+          match original.combatState with
+          | some pcs =>
+              if cs.shuffleRng.isSome && pcs.turnNumber == 1 then
+                let goesLast := fun (c : CardInstance) => c.enchantment.any (·.modelId == ModelId.mkEnchantment "IMBUED")
+                let (bottom, ordinary) := pcs.piles.draw.partition goesLast
+                let (innate, middle) := ordinary.partition (·.hasKeyword .innate)
+                let next := cs2.updatePlayer pid fun p =>
+                  { p with combatState := p.combatState.map fun c =>
+                    { c with piles.draw := innate.reverse ++ middle ++ bottom } }
+                (next, min PlayerPiles.maxCardsInHand (max baseDraw innate.length))
+              else (cs2, baseDraw)
+          | none => (cs2, baseDraw)
+        let (cs3, _) := drawCards beforeDraw reg pid draws true modSubscribers
         let cs4 := setPlayerPhase cs3 pid .autoPrePlay
         setPlayerPhase cs4 pid .play
 
@@ -247,5 +264,75 @@ def executeActionQueue (cs : CombatState) (exec : ActionExecutorState) (reg : Be
     (modSubscribers : List (ModId × ModelId) := []) :
     CombatState × ActionExecutorState :=
   queue.foldl (fun (s, e) act => executeGameAction s e reg act cardEffect modSubscribers) (cs, exec)
+
+-- ============================================================================
+-- Hook-Driven Side Turn Start / End Lifecycle
+-- ============================================================================
+
+/-- Execute pure `HookEffect` instructions emitted by turn-lifecycle hooks. -/
+def executeHookEffects (cs : CombatState) (reg : BehaviorRegistry) (effects : List HookEffect)
+    (modSubscribers : List (ModId × ModelId) := []) : CombatState :=
+  effects.foldl (fun acc eff =>
+    match eff with
+    | .tickDownDuration oid instId => tickDownDuration acc oid instId
+    | .clearSkipDurationTick oid instId => clearSkipDurationTick acc oid instId
+    | .decrementPower oid instId =>
+        -- PoisonPower.Trigger checks IsAlive after dealing damage.
+        if (acc.findCreature oid |>.map (·.isAlive) |>.getD false) then
+          decrementPowerById acc oid instId
+        else acc
+    | .modifyPowerAmount oid instId delta => (modifyPowerAmount acc reg oid instId (Dec.ofInt delta) none modSubscribers).1
+    | .applyPowerById tid pid amt pType allowNeg =>
+        let tmpl : PowerInstance :=
+          { instanceId := 0
+          , modelId := pid
+          , ownerId := tid
+          , powerType := pType
+          , stackType := .counter
+          , allowNegative := allowNeg }
+        (applyPower acc reg tmpl tid (Dec.ofInt amt) (some tid) modSubscribers).1
+    | .dealDamage dealerId targetId amt props =>
+        (damageSingleTarget acc reg targetId amt props dealerId none .all modSubscribers).1
+    | .gainBlock targetId amt props =>
+        (gainBlock acc reg targetId amt props none modSubscribers).1
+    | .doomKillSide side =>
+        triggerSideDoomKill acc reg side modSubscribers) cs
+
+/-- Execute start-of-side-turn hooks (`Poison` tick, `Plating` decay, `Plasma` orbs on player turn).
+    Ref: `CombatManager.cs` (`AfterSideTurnStart` + `OrbQueue.AfterTurnStart`). -/
+def runSideTurnStartLifecycle (cs : CombatState) (reg : BehaviorRegistry) (side : CombatSide)
+    (modSubscribers : List (ModId × ModelId) := []) : CombatState × CombatOutcome :=
+  if !cs.isInProgress then (cs, .ongoing)
+  else
+    let participants := (cs.getTeammatesOf side).filter (·.isAlive) |>.map (·.id)
+    let effects := collectAfterSideTurnStartEffects cs reg side participants modSubscribers
+    let cs1 := executeHookEffects cs reg effects modSubscribers
+    let cs2 :=
+      if side == .player then
+        cs1.players.foldl (fun acc p => triggerTurnStartOrbs acc reg p.playerId modSubscribers) cs1
+      else cs1
+    checkWinCondition (checkAllPlayersDead cs2) reg modSubscribers
+
+/-- Execute end-of-side-turn hooks (`Plating` block, `BeforeTurnEnd` orbs, `Doom` execute,
+    `Vulnerable`/`Weak`/`Frail` duration tick via `skipNextDurationTick`, `Intangible` decrement, `Ritual`).
+    Ref: `CombatManager.cs` (`BeforeSideTurnEnd` + `OrbQueue.BeforeTurnEnd` + `AfterSideTurnEnd`). -/
+def runSideTurnEndLifecycle (cs : CombatState) (reg : BehaviorRegistry) (side : CombatSide)
+    (modSubscribers : List (ModId × ModelId) := []) : CombatState × CombatOutcome :=
+  if !cs.isInProgress then (cs, .ongoing)
+  else
+    let participants := (cs.getTeammatesOf side).filter (·.isAlive) |>.map (·.id)
+    let beforeEffs := collectBeforeSideTurnEndEffects cs reg side participants modSubscribers
+    let cs1 := executeHookEffects cs reg beforeEffs modSubscribers
+    let cs2 :=
+      if side == .player then
+        cs1.players.foldl (fun acc p => triggerTurnEndOrbs acc reg p.playerId modSubscribers) cs1
+      else cs1
+    let (cs3, outcome) := checkWinCondition (checkAllPlayersDead cs2) reg modSubscribers
+    if !cs3.isInProgress then (cs3, outcome)
+    else
+      let afterParticipants := (cs3.getTeammatesOf side).filter (·.isAlive) |>.map (·.id)
+      let afterEffs := collectAfterSideTurnEndEffects cs3 reg side afterParticipants modSubscribers
+      let cs4 := executeHookEffects cs3 reg afterEffs modSubscribers
+      checkWinCondition (checkAllPlayersDead cs4) reg modSubscribers
 
 end Sts2Model.Combat

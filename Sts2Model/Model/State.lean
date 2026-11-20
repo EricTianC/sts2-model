@@ -61,6 +61,10 @@ structure CombatState where
   rng              : Rng := Rng.ofSeed 0
   nextInstanceId   : Nat := 1000
   turnReady        : List PlayerTurnReadyState := []
+  ascensionLevel   : Nat := 0
+  /-- Optional specialized streams for runs; v1 trace combat keeps its single legacy stream. -/
+  shuffleRng        : Option Rng := none
+  monsterAiRng      : Option Rng := none
   deriving Repr, DecidableEq, Inhabited
 
 namespace CombatState

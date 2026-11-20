@@ -5,6 +5,10 @@ defaultTargets = ["Sts2Model", "sts2sim"]
 [[lean_lib]]
 name = "Sts2Model"
 
+[[lean_lib]]
+name = "Sts2Sim"
+globs = ["Sts2Sim.+"]
+
 [[lean_exe]]
 name = "sts2sim"
 root = "Sts2Sim.Main"

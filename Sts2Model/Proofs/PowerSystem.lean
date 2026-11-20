@@ -180,4 +180,61 @@ theorem artifact_blocks_visible_debuff (ctx : ListenerCtx) (owner target : Creat
   have _ := owner
   simp [artifactBehavior, hOwner, hDebuff, hVis, hArtPos]
 
+/-- When `skipNextDurationTick = true`, `tickDownDuration` clears the flag without
+    decrementing the power stack (`PowerCmd.TickDownDuration`). -/
+theorem tickDownDuration_clears_skip_without_decrementing (cs : CombatState)
+    (targetId : CreatureId) (instId : PowerInstanceId) (c : Creature) (p : PowerInstance)
+    (hCreature : cs.findCreature targetId = some c)
+    (hPower : c.powers.find? (·.instanceId == instId) = some p)
+    (hSkip : p.skipNextDurationTick = true) :
+    tickDownDuration cs targetId instId = clearSkipDurationTick cs targetId instId := by
+  simp [tickDownDuration, hCreature, hPower, hSkip]
+
+/-- When `skipNextDurationTick = false`, `tickDownDuration` decrements the duration power by 1. -/
+theorem tickDownDuration_decrements_when_not_skipped (cs : CombatState)
+    (targetId : CreatureId) (instId : PowerInstanceId) (c : Creature) (p : PowerInstance)
+    (hCreature : cs.findCreature targetId = some c)
+    (hPower : c.powers.find? (·.instanceId == instId) = some p)
+    (hNoSkip : p.skipNextDurationTick = false) :
+    tickDownDuration cs targetId instId = decrementPowerById cs targetId instId := by
+  simp [tickDownDuration, hCreature, hPower, hNoSkip]
+
+/-- `ThornsPower` never fires reactive damage against unpowered attacks (`props.isPoweredAttack = false`). -/
+theorem thornsBehavior_ignores_unpowered_attacks (ctx : ListenerCtx) (cs : CombatState)
+    (target : Creature) (amount : Dec) (props : ValueProp) (dealer : Option Creature)
+    (hUnpow : props.isPoweredAttack = false) :
+    thornsBehavior.beforeDamageReceived ctx cs target amount props dealer = [] := by
+  unfold thornsBehavior
+  dsimp only
+  cases ctx.ownerId <;> cases dealer <;> simp [hUnpow]
+
+/-- `PoisonPower` emits unblockable unpowered HP loss followed by power decrement at side turn start. -/
+theorem poisonBehavior_emits_unblockable_unpowered_damage_and_decrement
+    (ctx : ListenerCtx) (cs : CombatState) (side : CombatSide) (participants : List CreatureId)
+    (oid : CreatureId) (instId : PowerInstanceId) (mid : ModelId)
+    (hRef : ctx.ref = .power oid instId mid)
+    (hPart : participants.contains oid = true)
+    (hPos : ctx.amount > 0) :
+    poisonBehavior.afterSideTurnStart ctx cs side participants =
+      [ HookEffect.dealDamage none oid (Dec.ofInt ctx.amount) DamageProps.nonCardHpLoss
+      , HookEffect.decrementPower oid instId ] := by
+  unfold poisonBehavior
+  dsimp only
+  rw [hRef]
+  have hMem : oid ∈ participants := List.contains_iff_mem.mp hPart
+  simp [hMem, hPos]
+
+/-- `DoomPower` executes doom kills exclusively at the end of `.enemy` turn (`DoomPower.BeforeSideTurnEnd`). -/
+theorem doomBehavior_triggers_only_on_enemy_side
+    (ctx : ListenerCtx) (cs : CombatState) (side : CombatSide) (participants : List CreatureId) :
+    (side ≠ .enemy → doomBehavior.beforeSideTurnEnd ctx cs side participants = []) ∧
+    (side = .enemy → doomBehavior.beforeSideTurnEnd ctx cs side participants = [HookEffect.doomKillSide .enemy]) := by
+  constructor
+  · intro hNe
+    unfold doomBehavior
+    cases side <;> simp_all
+  · intro hEq
+    subst hEq
+    rfl
+
 end Sts2Model.Proofs

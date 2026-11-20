@@ -488,6 +488,7 @@ structure WireCombatSnapshot where
   isInProgress   : Bool := true
   isEnding       : Bool := false
   nextInstanceId : Nat := 1000
+  ascensionLevel : Option Nat := none
   rng            : WireRng := {}
   allies         : List WireCreature := []
   enemies        : List WireCreature := []
@@ -502,6 +503,7 @@ instance : ToJson WireCombatSnapshot where
     , ("isInProgress", toJson c.isInProgress)
     , ("isEnding", toJson c.isEnding)
     , ("nextInstanceId", toJson c.nextInstanceId)
+    , ("ascensionLevel", toJson c.ascensionLevel)
     , ("rng", toJson c.rng)
     , ("allies", toJson c.allies)
     , ("enemies", toJson c.enemies)
@@ -515,12 +517,14 @@ instance : FromJson WireCombatSnapshot where
     let ip ← getFieldD j "isInProgress" true
     let ie ← getFieldD j "isEnding" false
     let nid ← getFieldD j "nextInstanceId" 1000
+    let asc ← getFieldOpt j "ascensionLevel"
     let rng ← getFieldD j "rng" {}
     let al ← getFieldD j "allies" []
     let en ← getFieldD j "enemies" []
     let pl ← getFieldD j "players" []
     .ok { combatId := cid, roundNumber := rn, currentSide := cs, isInProgress := ip
-        , isEnding := ie, nextInstanceId := nid, rng := rng, allies := al, enemies := en, players := pl }
+        , isEnding := ie, nextInstanceId := nid, ascensionLevel := asc
+        , rng := rng, allies := al, enemies := en, players := pl }
 
 structure WireRunSnapshot where
   runSeed         : String := "0"
@@ -1269,12 +1273,13 @@ def encodeCombatSnapshot (cs : CombatState) : WireCombatSnapshot :=
   , isInProgress := cs.isInProgress
   , isEnding := cs.isEnding
   , nextInstanceId := cs.nextInstanceId
+  , ascensionLevel := some cs.ascensionLevel
   , rng := encodeRng cs.rng
   , allies := cs.allies.map encodeCreature
   , enemies := cs.enemies.map encodeCreature
   , players := cs.players.map encodePlayer }
 
-def decodeCombatSnapshot (w : WireCombatSnapshot) : Except String CombatState := do
+def decodeCombatSnapshot (w : WireCombatSnapshot) (fallbackAsc : Nat := 0) : Except String CombatState := do
   let sd ← decodeCombatSide w.currentSide
   let rng ← decodeRng w.rng
   let al ← w.allies.mapM decodeCreature
@@ -1286,6 +1291,7 @@ def decodeCombatSnapshot (w : WireCombatSnapshot) : Except String CombatState :=
       , isInProgress := w.isInProgress
       , isEnding := w.isEnding
       , nextInstanceId := w.nextInstanceId
+      , ascensionLevel := w.ascensionLevel.getD fallbackAsc
       , rng := rng
       , allies := al
       , enemies := en
@@ -1329,7 +1335,7 @@ def decodeTimelineState (w : WireInitialState) : Except String TimelineState := 
   let rs ← decodeRunSnapshot w.run
   let cmb ← match w.combat with
     | none => .ok none
-    | some wc => (decodeCombatSnapshot wc).map some
+    | some wc => (decodeCombatSnapshot wc rs.ascensionLevel).map some
   let baseQs := ActionQueueSet.init w.playerIds w.nextActionId w.nextHookId
   let qs0 := if w.isInCombat then baseQs.combatStarted else baseQs
   let qs := { qs0 with canceledCount := w.canceledCount }

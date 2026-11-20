@@ -59,10 +59,27 @@ def moveCard (piles : PlayerPiles) (cid : CardInstanceId) (destPile : PileType)
 def removeCardFromCombat (piles : PlayerPiles) (cid : CardInstanceId) : PlayerPiles × Option CardInstance :=
   moveCard piles cid .none
 
-/-- Shuffle discard pile into draw pile using `Rng.unstableShuffle`.
-    Ref: `CardPileCmd.Shuffle`. -/
-def shuffleDiscardIntoDraw (piles : PlayerPiles) (rng : Rng) : PlayerPiles × Rng :=
-  let (shuffled, rng') := Rng.unstableShuffle (piles.draw ++ piles.discard) rng
+private def stableCombatCardOrder (a b : CardInstance) : Bool :=
+  let optionalId (a b : Option ModelId) : Ordering :=
+    match a, b with
+    | none, none => .eq
+    | none, some _ => .lt
+    | some _, none => .gt
+    | some x, some y => compare x y
+  let ord := (compare a.modelId b.modelId).then
+    ((compare a.upgradeLevel b.upgradeLevel).then
+      ((optionalId (a.enchantment.map (·.modelId)) (b.enchantment.map (·.modelId))).then
+        ((optionalId (a.affliction.map (·.modelId)) (b.affliction.map (·.modelId))).then
+          (compare (a.energyCost.getResolved a.isCanonical) (b.energyCost.getResolved b.isCanonical)))))
+  ord != .gt
+
+/-- Recycle the discard pile. With a run shuffle stream, apply the modeled fields of
+    `CardModel.CompareTo` before shuffling (`CardPileCmd.Shuffle` → `StableShuffle`).
+    The v1 replay path retains its original unsorted contract. -/
+def shuffleDiscardIntoDraw (piles : PlayerPiles) (rng : Rng) (stable : Bool := false) : PlayerPiles × Rng :=
+  let cards := if stable then (piles.discard ++ piles.draw).mergeSort stableCombatCardOrder
+               else piles.draw ++ piles.discard
+  let (shuffled, rng') := Rng.unstableShuffle cards rng
   ({ piles with draw := shuffled, discard := [] }, rng')
 
 /-- Draw up to `count` cards respecting hand limit (`maxCardsInHand = 10`),
@@ -88,11 +105,12 @@ def drawCards (cs : CombatState) (reg : BehaviorRegistry) (pid : PlayerId)
                 else if !(shouldDraw state reg player fromHandDraw modSubscribers).1 then
                   (state, drawn)
                 else
+                  let shuffle := state.shuffleRng.getD state.rng
                   let (pilesAfterShuffle, rng') :=
                     if pcs.piles.draw.isEmpty && !pcs.piles.discard.isEmpty then
-                      shuffleDiscardIntoDraw pcs.piles state.rng
+                      shuffleDiscardIntoDraw pcs.piles shuffle state.shuffleRng.isSome
                     else
-                      (pcs.piles, state.rng)
+                      (pcs.piles, shuffle)
                   match pilesAfterShuffle.draw with
                   | [] =>
                       let pcs' := { pcs with piles := pilesAfterShuffle }
@@ -102,7 +120,9 @@ def drawCards (cs : CombatState) (reg : BehaviorRegistry) (pid : PlayerId)
                         draw := restDraw
                         hand := pilesAfterShuffle.hand ++ [topCard] }
                       let pcs' := { pcs with piles := piles' }
-                      let state' := { state.updatePlayer pid (fun p => { p with combatState := some pcs' }) with rng := rng' }
+                      let withPiles := state.updatePlayer pid fun p => { p with combatState := some pcs' }
+                      let state' := if state.shuffleRng.isSome then { withPiles with shuffleRng := some rng' }
+                                    else { withPiles with rng := rng' }
                       loop n state' (drawn ++ [topCard])
   loop count cs []
 

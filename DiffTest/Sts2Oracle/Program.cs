@@ -83,7 +83,12 @@ internal sealed class RngOracle
         new(MegaRandomOracle.FromState(s0, s1, s2, s3), counter);
     public RngOracle Clone() => new(_random.Clone(), Counter);
     public ulong NextUnsignedLong() { Counter++; return _random.NextULongInner(); }
-    public int NextInt(int maxExclusive) => maxExclusive <= 0 ? 0 : Math.Min(_random.Next(maxExclusive), maxExclusive - 1);
+    public int NextInt(int maxExclusive)
+    {
+        if (maxExclusive <= 0) return 0;
+        Counter++;
+        return Math.Min(_random.Next(maxExclusive), maxExclusive - 1);
+    }
     public bool NextBool() => NextInt(2) == 0;
     public double NextDouble() { Counter++; return _random.NextDouble(); }
     public float NextFloat() => (float)NextDouble();
@@ -141,7 +146,7 @@ internal sealed record DamageResultRec(
     bool WasFullyBlocked,
     bool WasTargetKilled);
 
-public static class Program
+public static partial class Program
 {
     private const int StatCap = 999999999;
 
@@ -845,35 +850,69 @@ public static class Program
 
     private sealed class TPower
     {
-        public int InstId; public string Entry = ""; public bool IsDebuff; public bool AllowNeg; public int Amt;
-        public TPower Clone() => new() { InstId = InstId, Entry = Entry, IsDebuff = IsDebuff, AllowNeg = AllowNeg, Amt = Amt };
+        public int InstId; public string Entry = ""; public bool IsDebuff; public bool AllowNeg; public bool IsSingle; public int Amt;
+        public bool SkipNextDurationTick;
+        public TPower Clone() => (TPower)MemberwiseClone();
+    }
+    private sealed class TOrb
+    {
+        public int InstId; public string Kind = "lightning"; public decimal BasePassive; public decimal BaseEvoke;
+        public TOrb Clone() => new() { InstId = InstId, Kind = Kind, BasePassive = BasePassive, BaseEvoke = BaseEvoke };
     }
     private sealed class TCreature
     {
-        public int Id; public string Entry = ""; public int Side; public int Hp; public int MaxHp; public int Block;
+        public int Id; public string Entry = ""; public int Side; public int? Pid; public int Hp; public int MaxHp; public int Block;
+        public int? PetOwnerId;
         public List<TPower> Powers = new();
         public string MoveId = ""; public List<string> StateLog = new();
-        public TCreature Clone() => new() { Id = Id, Entry = Entry, Side = Side, Hp = Hp, MaxHp = MaxHp, Block = Block, Powers = Powers.Select(p => p.Clone()).ToList(), MoveId = MoveId, StateLog = new List<string>(StateLog) };
+        public TCreature Clone()
+        {
+            var copy = (TCreature)MemberwiseClone();
+            copy.Powers = Powers.Select(p => p.Clone()).ToList();
+            copy.StateLog = new(StateLog);
+            return copy;
+        }
         public int GetPowerAmt(string entry) => Powers.FirstOrDefault(p => p.Entry == entry)?.Amt ?? 0;
         public bool HasPower(string entry) => Powers.Any(p => p.Entry == entry);
     }
     private sealed class TCard
     {
         public int InstId; public string Entry = ""; public string CardType = "attack"; public int Cost; public int UpgradeLevel;
-        public int BaseDamage; public int BaseBlock; public bool GainsBlock;
-        public TCard Clone() => new() { InstId = InstId, Entry = Entry, CardType = CardType, Cost = Cost, UpgradeLevel = UpgradeLevel, BaseDamage = BaseDamage, BaseBlock = BaseBlock, GainsBlock = GainsBlock };
+        public decimal BaseDamage; public int BaseBlock; public bool GainsBlock; public bool IsDupe;
+        public bool Exhausts;
+        public int CombatCostDelta;
+        public int CurrentCost => Cost < 0 ? Cost : (int)Math.Clamp((long)Cost + CombatCostDelta, 0, int.MaxValue);
+        public TCard Clone() => (TCard)MemberwiseClone();
     }
     private sealed class TPlayer
     {
         public int Pid; public int Cid; public int Energy; public int BaseMaxEnergy; public int Stars; public int TurnNumber;
+        public int OrbCapacity = 3;
+        public List<TOrb> Orbs = new();
         public List<string?> Potions = new();
         public List<string> Relics = new();
         public List<TCard> Hand = new(); public List<TCard> Draw = new(); public List<TCard> Discard = new(); public List<TCard> Exhaust = new();
-        public TPlayer Clone() => new() { Pid = Pid, Cid = Cid, Energy = Energy, BaseMaxEnergy = BaseMaxEnergy, Stars = Stars, TurnNumber = TurnNumber, Potions = new List<string?>(Potions), Relics = new List<string>(Relics), Hand = Hand.Select(c => c.Clone()).ToList(), Draw = Draw.Select(c => c.Clone()).ToList(), Discard = Discard.Select(c => c.Clone()).ToList(), Exhaust = Exhaust.Select(c => c.Clone()).ToList() };
+        public List<TCard> Play = new();
+        public List<int> PetIds = new();
+        public decimal SovereignBladeBonus;
+        public TPlayer Clone()
+        {
+            var copy = (TPlayer)MemberwiseClone();
+            copy.Orbs = Orbs.Select(o => o.Clone()).ToList();
+            copy.Potions = new(Potions);
+            copy.Relics = new(Relics);
+            copy.Hand = Hand.Select(c => c.Clone()).ToList();
+            copy.Draw = Draw.Select(c => c.Clone()).ToList();
+            copy.Discard = Discard.Select(c => c.Clone()).ToList();
+            copy.Exhaust = Exhaust.Select(c => c.Clone()).ToList();
+            copy.Play = Play.Select(c => c.Clone()).ToList();
+            copy.PetIds = new(PetIds);
+            return copy;
+        }
     }
     private sealed class TSimState
     {
-        public ulong RunSeed = 0; public int ActIndex = 0; public int Gold = 99; public int TotalFloors = 0;
+        public ulong RunSeed = 0; public int ActIndex = 0; public int AscensionLevel = 0; public int Gold = 99; public int TotalFloors = 0;
         public int CombatId = 1; public int RoundNumber = 1; public int Side = 1; public bool IsInProgress = true; public bool IsEnding = false;
         public bool HasCombat = true;
         public RngOracle Rng = new(1);
@@ -881,7 +920,7 @@ public static class Program
         public int NextActionId = 0; public int NextHookId = 0; public bool IsInCombat = true; public int CanceledCount = 0; public int NextChecksumId = 0;
         public List<TCreature> Creatures = new();
         public List<TPlayer> Players = new();
-        public TSimState Clone() => new() { RunSeed = RunSeed, ActIndex = ActIndex, Gold = Gold, TotalFloors = TotalFloors, CombatId = CombatId, RoundNumber = RoundNumber, Side = Side, IsInProgress = IsInProgress, IsEnding = IsEnding, HasCombat = HasCombat, Rng = Rng.Clone(), NextInstanceId = NextInstanceId, NextActionId = NextActionId, NextHookId = NextHookId, IsInCombat = IsInCombat, CanceledCount = CanceledCount, NextChecksumId = NextChecksumId, Creatures = Creatures.Select(c => c.Clone()).ToList(), Players = Players.Select(p => p.Clone()).ToList() };
+        public TSimState Clone() => new() { RunSeed = RunSeed, ActIndex = ActIndex, AscensionLevel = AscensionLevel, Gold = Gold, TotalFloors = TotalFloors, CombatId = CombatId, RoundNumber = RoundNumber, Side = Side, IsInProgress = IsInProgress, IsEnding = IsEnding, HasCombat = HasCombat, Rng = Rng.Clone(), NextInstanceId = NextInstanceId, NextActionId = NextActionId, NextHookId = NextHookId, IsInCombat = IsInCombat, CanceledCount = CanceledCount, NextChecksumId = NextChecksumId, Creatures = Creatures.Select(c => c.Clone()).ToList(), Players = Players.Select(p => p.Clone()).ToList() };
         public TCreature? FindC(int id) => Creatures.FirstOrDefault(c => c.Id == id);
         public TPlayer? FindP(int pid) => Players.FirstOrDefault(p => p.Pid == pid);
     }
@@ -947,7 +986,7 @@ public static class Program
         return h;
     }
 
-    private static void TApplyDamageHit(TSimState st, int? dealerCid, int targetCid, decimal baseAmt, ValuePropFlags props)
+    private static void TApplyDamageHitCore(TSimState st, int? dealerCid, int targetCid, decimal baseAmt, ValuePropFlags props)
     {
         var d = dealerCid.HasValue ? st.FindC(dealerCid.Value) : null;
         if (d != null && d.Hp <= 0) return;
@@ -957,37 +996,245 @@ public static class Program
         if (props.IsPoweredAttack())
         {
             if (d != null) num += d.GetPowerAmt("STRENGTH_POWER");
+            if (d != null && d.Pid.HasValue && (st.FindP(d.Pid.Value)?.Relics.Contains("VAJRA") ?? false))
+                num += 1m;
             if (d != null && d.HasPower("WEAK_POWER")) num *= 0.75m;
-            if (t.HasPower("VULNERABLE_POWER")) num *= 1.5m;
+            if (t.HasPower("VULNERABLE_POWER"))
+            {
+                bool phrog = d != null && d.Pid.HasValue && (st.FindP(d.Pid.Value)?.Relics.Contains("PAPER_PHROG") ?? false);
+                num *= phrog ? 1.75m : 1.5m;
+            }
         }
+        if (t.HasPower("INTANGIBLE_POWER")) num = Math.Min(num, 1m);
         num = Math.Max(0m, num);
-        decimal blockedDec = props.HasFlag(ValuePropFlags.Unblockable) ? 0m : Math.Min((decimal)t.Block, num);
-        int blockedTrunc = Math.Max(0, (int)decimal.Truncate(blockedDec));
-        t.Block -= Math.Min(t.Block, blockedTrunc);
+        var blockHolder = t.PetOwnerId is int ownerId && st.FindP(ownerId) is { } owner
+            ? st.FindC(owner.Cid) ?? t : t;
+        decimal blockedDec = props.HasFlag(ValuePropFlags.Unblockable) ? 0m : Math.Min(blockHolder.Block, num);
+        blockHolder.Block -= (int)blockedDec;
         decimal rem = Math.Max(0m, num - blockedDec);
-        int hpLoss = Math.Max(0, (int)decimal.Truncate(Math.Clamp(rem, 0m, (decimal)StatCap)));
-        t.Hp -= Math.Min(t.Hp, hpLoss);
-    }
-
-    private static void TApplyPower(TSimState st, int targetCid, string entry, bool isDebuff, bool allowNeg, int amt)
-    {
-        if (st.IsEnding || amt == 0) return;
-        var t = st.FindC(targetCid);
-        if (t == null) return;
-        var ex = t.Powers.FirstOrDefault(p => p.Entry == entry);
-        if (ex != null)
+        if (props.IsPoweredAttack() && t.Pid is int pid && st.Creatures.Find(c =>
+                c.PetOwnerId == pid && c.Hp > 0 && c.HasPower("DIE_FOR_YOU_POWER")) is { } pet)
         {
-            ex.Amt = Math.Clamp(ex.Amt + amt, -StatCap, StatCap);
-            bool rem = allowNeg ? ex.Amt == 0 : ex.Amt <= 0;
-            if (rem) t.Powers.Remove(ex);
+            int spill = LoseTimelineHp(pet, rem);
+            LoseTimelineHp(t, spill);
         }
         else
+            LoseTimelineHp(t, rem);
+    }
+
+    private static int LoseTimelineHp(TCreature target, decimal amount)
+    {
+        if (target.HasPower("INTANGIBLE_POWER")) amount = Math.Min(amount, 1m);
+        int hpLoss = (int)Math.Clamp(amount, 0m, StatCap);
+        int lost = Math.Min(target.Hp, hpLoss);
+        target.Hp -= lost;
+        return hpLoss - lost;
+    }
+
+    private static void TApplyDamageHit(TSimState st, int? dealerCid, int targetCid, decimal baseAmt, ValuePropFlags props)
+    {
+        var d = dealerCid.HasValue ? st.FindC(dealerCid.Value) : null;
+        var t = st.FindC(targetCid);
+        if ((d == null || d.Hp > 0) && t != null && t.Hp > 0 && d != null && props.IsPoweredAttack())
         {
-            int newId = st.NextInstanceId++;
-            int clamped = Math.Clamp(amt, -StatCap, StatCap);
-            bool rem = allowNeg ? clamped == 0 : clamped <= 0;
-            if (!rem) t.Powers.Add(new TPower { InstId = newId, Entry = entry, IsDebuff = isDebuff, AllowNeg = allowNeg, Amt = clamped });
+            foreach (var pw in t.Powers)
+                if (pw.Entry == "THORNS_POWER" && pw.Amt > 0)
+                    TApplyDamageHitCore(st, t.Id, d.Id, pw.Amt, ValuePropFlags.Unpowered);
         }
+        TApplyDamageHitCore(st, dealerCid, targetCid, baseAmt, props);
+    }
+
+    private static void OracleModifyPowerAmount(TSimState st, int targetCid, int instId, int delta)
+    {
+        if (st.IsEnding) return;
+        var c = st.FindC(targetCid);
+        var p = c?.Powers.FirstOrDefault(x => x.InstId == instId);
+        if (c == null || p == null) return;
+        p.Amt = Math.Clamp(p.Amt + delta, -StatCap, StatCap);
+        bool rem = p.AllowNeg ? p.Amt == 0 : p.Amt <= 0;
+        if (rem) c.Powers.Remove(p);
+    }
+
+    private static void OracleTickDownDuration(TSimState st, int targetCid, int instId)
+    {
+        var c = st.FindC(targetCid);
+        var p = c?.Powers.FirstOrDefault(x => x.InstId == instId);
+        if (p == null) return;
+        if (p.SkipNextDurationTick)
+            p.SkipNextDurationTick = false;
+        else
+            OracleModifyPowerAmount(st, targetCid, instId, -1);
+    }
+
+    private static void OracleTriggerOrbPassiveWithFocus(TSimState st, TPlayer pl, TOrb orb)
+    {
+        if (st.IsEnding) return;
+        var pCreature = st.FindC(pl.Cid);
+        int focus = pCreature?.GetPowerAmt("FOCUS_POWER") ?? 0;
+        decimal effectivePassive = orb.Kind == "plasma"
+            ? orb.BasePassive
+            : Math.Max(0m, orb.BasePassive + focus);
+        switch (orb.Kind)
+        {
+            case "lightning":
+            {
+                var target = st.Creatures.FirstOrDefault(c => c.Side == 2 && c.Hp > 0);
+                if (target != null)
+                    TApplyDamageHit(st, pl.Cid, target.Id, effectivePassive, ValuePropFlags.Move | ValuePropFlags.Unpowered);
+                break;
+            }
+            case "frost":
+            {
+                WireGainBlock(st, pl.Cid, effectivePassive, ValuePropFlags.Unpowered);
+                if (pCreature != null && pCreature.HasPower("HIBERNATE_POWER"))
+                {
+                    foreach (var other in st.Players)
+                    {
+                        if (other.Pid != pl.Pid)
+                            WireGainBlock(st, other.Cid, effectivePassive, ValuePropFlags.Unpowered);
+                    }
+                }
+                break;
+            }
+            case "dark":
+                orb.BaseEvoke += effectivePassive;
+                break;
+            case "plasma":
+                pl.Energy = Math.Min(StatCap, pl.Energy + Math.Max(0, (int)decimal.Truncate(orb.BasePassive)));
+                break;
+            case "glass":
+            {
+                if (effectivePassive <= 0) break;
+                orb.BasePassive = Math.Max(0m, orb.BasePassive - 1m);
+                foreach (var en in st.Creatures)
+                    if (en.Side == 2 && en.Hp > 0)
+                        TApplyDamageHit(st, pl.Cid, en.Id, effectivePassive, ValuePropFlags.Unpowered);
+                break;
+            }
+        }
+    }
+
+    private static void RunSideTurnStartLifecycle(TSimState st, int side)
+    {
+        if (!st.IsInProgress) return;
+        var participants = st.Creatures.Where(c => c.Side == side && c.Hp > 0).Select(c => c.Id).ToHashSet();
+        var effects = new List<Action>();
+        foreach (var c in st.Creatures)
+        {
+            foreach (var pw in c.Powers)
+            {
+                if (pw.Entry == "POISON_POWER" && participants.Contains(c.Id) && pw.Amt > 0)
+                {
+                    int cid = c.Id; int instId = pw.InstId; decimal amt = pw.Amt;
+                    effects.Add(() =>
+                    {
+                        TApplyDamageHit(st, null, cid, amt, ValuePropFlags.Move | ValuePropFlags.Unpowered | ValuePropFlags.Unblockable);
+                        if (st.FindC(cid) is { Hp: > 0 })
+                            OracleModifyPowerAmount(st, cid, instId, -1);
+                    });
+                }
+                else if (pw.Entry == "PLATING_POWER" && participants.Contains(c.Id))
+                {
+                    bool skipPlayerTurn1 = c.Pid.HasValue && (st.FindP(c.Pid.Value)?.TurnNumber == 1);
+                    bool skipEnemyRound1 = c.Side == 2 && st.RoundNumber == 1;
+                    if (!skipPlayerTurn1 && !skipEnemyRound1)
+                    {
+                        int cid = c.Id; int instId = pw.InstId;
+                        int decr = c.Side == 2 ? -Math.Max(1, st.Players.Count) : -1;
+                        effects.Add(() => OracleModifyPowerAmount(st, cid, instId, decr));
+                    }
+                }
+            }
+        }
+        foreach (var act in effects) act();
+        if (side == 1)
+        {
+            foreach (var p in st.Players)
+            {
+                foreach (var orb in p.Orbs.Where(o => o.Kind == "plasma").ToList())
+                    OracleTriggerOrbPassiveWithFocus(st, p, orb);
+            }
+        }
+        TCheckWin(st);
+    }
+
+    private static void RunSideTurnEndLifecycle(TSimState st, int side)
+    {
+        if (!st.IsInProgress) return;
+        var participants = st.Creatures.Where(c => c.Side == side && c.Hp > 0).Select(c => c.Id).ToHashSet();
+        var beforeEffects = new List<Action>();
+        foreach (var c in st.Creatures)
+        {
+            foreach (var pw in c.Powers)
+            {
+                if (pw.Entry == "PLATING_POWER" && participants.Contains(c.Id) && pw.Amt > 0)
+                {
+                    int cid = c.Id; decimal amt = pw.Amt;
+                    beforeEffects.Add(() => WireGainBlock(st, cid, amt, ValuePropFlags.Unpowered));
+                }
+                else if (pw.Entry == "DOOM_POWER" && side == 2)
+                {
+                    beforeEffects.Add(() =>
+                    {
+                        if (st.IsEnding) return;
+                        foreach (var en in st.Creatures.Where(x => x.Side == 2 && x.Hp > 0).ToList())
+                        {
+                            int doomAmt = en.GetPowerAmt("DOOM_POWER");
+                            if (doomAmt > 0 && en.Hp <= doomAmt)
+                            {
+                                en.Hp = 0;
+                                // The modeled death hook removes all powers; Kill does not reset block.
+                                en.Powers.Clear();
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        foreach (var act in beforeEffects) act();
+        if (side == 1)
+        {
+            foreach (var p in st.Players)
+            {
+                foreach (var orb in p.Orbs.Where(o => o.Kind != "plasma").ToList())
+                    OracleTriggerOrbPassiveWithFocus(st, p, orb);
+            }
+        }
+        TCheckWin(st);
+        if (!st.IsInProgress) return;
+        var afterParticipants = st.Creatures.Where(c => c.Side == side && c.Hp > 0).Select(c => c.Id).ToHashSet();
+        var afterEffects = new List<Action>();
+        foreach (var c in st.Creatures)
+        {
+            foreach (var pw in c.Powers)
+            {
+                if ((pw.Entry == "VULNERABLE_POWER" || pw.Entry == "WEAK_POWER" || pw.Entry == "FRAIL_POWER") && side == 2)
+                {
+                    int cid = c.Id; int instId = pw.InstId;
+                    afterEffects.Add(() => OracleTickDownDuration(st, cid, instId));
+                }
+                else if (pw.Entry == "INTANGIBLE_POWER" && side == 2)
+                {
+                    int cid = c.Id; int instId = pw.InstId;
+                    afterEffects.Add(() => OracleModifyPowerAmount(st, cid, instId, -1));
+                }
+                else if (pw.Entry == "RITUAL_POWER" && afterParticipants.Contains(c.Id))
+                {
+                    int cid = c.Id; int instId = pw.InstId; int amt = pw.Amt;
+                    if (pw.SkipNextDurationTick)
+                        afterEffects.Add(() =>
+                        {
+                            var cr = st.FindC(cid);
+                            var rp = cr?.Powers.FirstOrDefault(x => x.InstId == instId);
+                            if (rp != null) rp.SkipNextDurationTick = false;
+                        });
+                    else if (amt > 0)
+                        afterEffects.Add(() => WireApplyPower(st, cid, "STRENGTH_POWER", false, true, amt));
+                }
+            }
+        }
+        foreach (var act in afterEffects) act();
+        TCheckWin(st);
     }
 
     private static void TCheckWin(TSimState st)
@@ -1008,41 +1255,7 @@ public static class Program
         void PlayCard(int pid, int cid, int? tid)
         {
             st.NextActionId++;
-            var p = st.FindP(pid);
-            if (p == null) return;
-            var card = p.Hand.FirstOrDefault(c => c.InstId == cid);
-            if (card == null || p.Energy < card.Cost) return;
-            p.Energy -= card.Cost;
-            p.Hand.Remove(card);
-            if (card.Entry == "BASH")
-            {
-                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 8m, ValuePropFlags.Move);
-                if (tid.HasValue) TApplyPower(st, tid.Value, "VULNERABLE_POWER", true, false, 2);
-            }
-            else if (card.Entry == "STRIKE_IRONCLAD")
-            {
-                decimal d = card.UpgradeLevel > 0 ? 9m : 6m;
-                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, d, ValuePropFlags.Move);
-            }
-            else if (card.Entry == "TWIN_STRIKE")
-            {
-                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 5m, ValuePropFlags.Move);
-                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 5m, ValuePropFlags.Move);
-            }
-            else if (card.Entry == "DEFEND_IRONCLAD")
-            {
-                var selfC = st.FindC(p.Cid);
-                if (selfC != null && !st.IsEnding && selfC.Hp > 0)
-                    selfC.Block = Math.Min(StatCap, selfC.Block + 5);
-            }
-            else if (card.Entry == "UPPERCUT")
-            {
-                if (tid.HasValue) TApplyDamageHit(st, p.Cid, tid.Value, 13m, ValuePropFlags.Move);
-                if (tid.HasValue) TApplyPower(st, tid.Value, "WEAK_POWER", true, false, 1);
-                if (tid.HasValue) TApplyPower(st, tid.Value, "VULNERABLE_POWER", true, false, 1);
-            }
-            p.Discard.Add(card);
-            TCheckWin(st);
+            TryPlayCombatCard(st, pid, cid, tid);
         }
 
         void UseFirePot()
@@ -1051,73 +1264,8 @@ public static class Program
             var p = st.FindP(1);
             if (p == null || !st.IsInProgress || p.Potions.Count == 0 || p.Potions[0] == null) return;
             p.Potions[0] = null;
-            TApplyDamageHit(st, p.Cid, 200, 20m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
+            ExecPotionEffect(st, p, "FIRE_POTION", EnemyCreatureId);
             TCheckWin(st);
-        }
-
-        void EndRound()
-        {
-            if (!st.IsInProgress) return;
-            // EndPlayerTurnPhase1+2 flush hand -> discard
-            foreach (var p in st.Players)
-            {
-                foreach (var c in p.Hand.ToList())
-                {
-                    p.Hand.Remove(c);
-                    p.Discard.Add(c);
-                }
-            }
-            st.Side = 2; // enemy
-            // ClearTurnStartBlock(.enemy)
-            foreach (var c in st.Creatures.Where(x => x.Side == 2)) c.Block = 0;
-            // COOP_GUARDIAN turn
-            var g = st.FindC(200);
-            if (g != null && g.Hp > 0 && st.IsInProgress)
-            {
-                bool first = g.StateLog.Count == 0;
-                string move = first ? g.MoveId : (g.MoveId == "SLAM" ? "FORTIFY" : "SLAM");
-                g.MoveId = move;
-                g.StateLog.Add(move);
-                if (move == "SLAM")
-                {
-                    foreach (var ally in st.Creatures.Where(c => c.Side == 1 && c.Hp > 0))
-                        TApplyDamageHit(st, g.Id, ally.Id, 7m, ValuePropFlags.Move);
-                }
-                else
-                {
-                    if (!st.IsEnding && g.Hp > 0) g.Block = Math.Min(StatCap, g.Block + 8);
-                    TApplyPower(st, g.Id, "STRENGTH_POWER", false, true, 1);
-                }
-            }
-            TCheckWin(st);
-            if (!st.IsInProgress) return;
-            // EndEnemyTurn
-            foreach (var p in st.Players) p.TurnNumber++;
-            st.RoundNumber++;
-            st.Side = 1;
-            foreach (var c in st.Creatures.Where(x => x.Side == 1))
-            {
-                var ow = st.FindP(c.Id == 101 ? 1 : 2);
-                if (ow == null || ow.TurnNumber != 1) c.Block = 0;
-            }
-            // SetupPlayerTurn for P1 then P2
-            foreach (var p in st.Players)
-            {
-                p.Energy = p.BaseMaxEnergy;
-                for (int i = 0; i < 5; i++)
-                {
-                    if (p.Hand.Count >= 10) break;
-                    if (p.Draw.Count == 0 && p.Discard.Count > 0)
-                    {
-                        p.Draw = RngOracle.UnstableShuffleGeneric(p.Discard, st.Rng);
-                        p.Discard.Clear();
-                    }
-                    if (p.Draw.Count == 0) break;
-                    var top = p.Draw[0];
-                    p.Draw.RemoveAt(0);
-                    p.Hand.Add(top);
-                }
-            }
         }
 
         switch (tok)
@@ -1129,7 +1277,7 @@ public static class Program
             case "P2_DEF": PlayCard(2, 2001, null); break;
             case "P2_STRIKEP": PlayCard(2, 2002, 200); break;
             case "P2_UPPER": PlayCard(2, 2003, 200); break;
-            case "END_ROUND": EndRound(); break;
+            case "END_ROUND": RunRound(st, RunTier1Monster); break;
         }
         st.NextChecksumId++;
     }
@@ -1144,8 +1292,8 @@ public static class Program
             : f[4].Split(';').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
 
         var init = new TSimState { Rng = new RngOracle(seed) };
-        init.Creatures.Add(new TCreature { Id = 101, Entry = "IRONCLAD", Side = 1, Hp = 80, MaxHp = 80 });
-        init.Creatures.Add(new TCreature { Id = 102, Entry = "SILENT", Side = 1, Hp = 70, MaxHp = 70 });
+        init.Creatures.Add(new TCreature { Id = 101, Entry = "IRONCLAD", Side = 1, Pid = 1, Hp = 80, MaxHp = 80 });
+        init.Creatures.Add(new TCreature { Id = 102, Entry = "SILENT", Side = 1, Pid = 2, Hp = 70, MaxHp = 70 });
         init.Creatures.Add(new TCreature { Id = 200, Entry = "COOP_GUARDIAN", Side = 2, Hp = enemyHp, MaxHp = enemyHp, MoveId = "SLAM" });
         init.Players.Add(new TPlayer
         {
@@ -1298,6 +1446,7 @@ public static class Program
         [JsonPropertyName("isInProgress")] public bool IsInProgress { get; set; } = true;
         [JsonPropertyName("isEnding")] public bool IsEnding { get; set; }
         [JsonPropertyName("nextInstanceId")] public int NextInstanceId { get; set; } = 1000;
+        [JsonPropertyName("ascensionLevel")] public int? AscensionLevel { get; set; }
         [JsonPropertyName("rng")] public WireRng Rng { get; set; } = new();
         [JsonPropertyName("allies")] public List<WireCreature> Allies { get; set; } = new();
         [JsonPropertyName("enemies")] public List<WireCreature> Enemies { get; set; } = new();
@@ -1450,6 +1599,7 @@ public static class Program
         {
             RunSeed = runSeed,
             ActIndex = w.Run.CurrentActIndex,
+            AscensionLevel = w.Run.AscensionLevel,
             Gold = w.Run.Gold,
             TotalFloors = w.Run.TotalFloors,
             NextActionId = w.NextActionId,
@@ -1468,6 +1618,7 @@ public static class Program
             st.IsInProgress = c.IsInProgress;
             st.IsEnding = c.IsEnding;
             st.NextInstanceId = c.NextInstanceId;
+            st.AscensionLevel = c.AscensionLevel ?? w.Run.AscensionLevel;
             if (string.IsNullOrEmpty(c.Rng.S0) && string.IsNullOrEmpty(c.Rng.S1) && !string.IsNullOrEmpty(c.Rng.Seed))
             {
                 ulong rSeed = ulong.Parse(c.Rng.Seed, CultureInfo.InvariantCulture);
@@ -1489,6 +1640,7 @@ public static class Program
                     Id = cr.Id,
                     Entry = cr.ModelEntry,
                     Side = cr.Side == "enemy" ? 2 : (cr.Side == "none" ? 0 : 1),
+                    Pid = cr.PlayerId,
                     Hp = cr.CurrentHp,
                     MaxHp = cr.MaxHp,
                     Block = cr.Block,
@@ -1500,6 +1652,7 @@ public static class Program
                         Entry = pw.ModelEntry,
                         IsDebuff = pw.PowerType == "debuff",
                         AllowNeg = pw.AllowNegative,
+                        IsSingle = pw.StackType == "single",
                         Amt = pw.Amount
                     }).ToList()
                 });
@@ -1532,43 +1685,45 @@ public static class Program
         return (int)Math.Min((long)maxBound, Math.Max(0L, raw));
     }
 
-    private static void WireApplyPower(TSimState st, int targetCid, string entry, bool isDebuff, bool allowNeg, int amt)
+    private static void WireApplyPower(TSimState st, int targetCid, string entry, bool isDebuff, bool allowNeg,
+        decimal amount, bool isSingle = false)
     {
-        if (st.IsEnding || amt == 0) return;
-        var t = st.FindC(targetCid);
-        if (t == null) return;
-        var ex = t.Powers.FirstOrDefault(p => p.Entry == entry);
-        if (ex != null)
+        if (st.IsEnding || amount == 0 || st.FindC(targetCid) is not { } target) return;
+        var existing = target.Powers.Find(p => p.Entry == entry);
+        // Apply allocates an ID before ModifyPowerAmountReceived, even when Artifact cancels it.
+        int id = existing?.InstId ?? st.NextInstanceId++;
+        bool debuff = existing?.IsDebuff ?? isDebuff;
+        bool negative = existing?.AllowNeg ?? allowNeg;
+        bool single = existing?.IsSingle ?? isSingle;
+        int delta = (int)Math.Clamp(amount, int.MinValue, int.MaxValue);
+        if (GetPowerTypeForAmount(debuff, delta, single, negative) == 1)
         {
-            if (isDebuff && entry != "ARTIFACT_POWER" && t.HasPower("ARTIFACT_POWER"))
+            var artifact = target.Powers.Find(p => p.Entry == "ARTIFACT_POWER" && p.Amt > 0);
+            if (artifact != null)
             {
-                var art = t.Powers.First(p => p.Entry == "ARTIFACT_POWER");
-                art.Amt--;
-                if (art.Amt <= 0) t.Powers.Remove(art);
+                if (--artifact.Amt == 0) target.Powers.Remove(artifact);
                 return;
             }
-            ex.Amt = Math.Clamp(ex.Amt + amt, -StatCap, StatCap);
-            bool rem = allowNeg ? ex.Amt == 0 : ex.Amt <= 0;
-            if (rem) t.Powers.Remove(ex);
         }
-        else
+        int next = ClampPowerAmount(single ? existing?.Amt ?? (delta == 0 ? 0 : 1)
+            : (int)Math.Clamp((long)(existing?.Amt ?? 0) + delta, int.MinValue, int.MaxValue));
+        if (existing != null)
         {
-            st.NextInstanceId++;
-            int instId = st.NextInstanceId - 1;
-            if (isDebuff && entry != "ARTIFACT_POWER" && t.HasPower("ARTIFACT_POWER"))
+            if (ShouldRemovePower(next, negative)) target.Powers.Remove(existing);
+            else existing.Amt = next;
+        }
+        else if (!ShouldRemovePower(next, negative))
+        {
+            bool skip = st.Side == 2 && (target.Side == 1 && debuff || target.Side == 2 && entry == "RITUAL_POWER");
+            target.Powers.Add(new TPower
             {
-                var art = t.Powers.First(p => p.Entry == "ARTIFACT_POWER");
-                art.Amt--;
-                if (art.Amt <= 0) t.Powers.Remove(art);
-                return;
-            }
-            int clamped = Math.Clamp(amt, -StatCap, StatCap);
-            bool rem = allowNeg ? clamped == 0 : clamped <= 0;
-            if (!rem) t.Powers.Add(new TPower { InstId = instId, Entry = entry, IsDebuff = isDebuff, AllowNeg = allowNeg, Amt = clamped });
+                InstId = id, Entry = entry, IsDebuff = debuff, AllowNeg = negative, IsSingle = single,
+                Amt = next, SkipNextDurationTick = skip
+            });
         }
     }
 
-    private static void WireGainBlock(TSimState st, int targetCid, decimal baseAmt, ValuePropFlags props)
+    private static void WireGainBlock(TSimState st, int targetCid, decimal baseAmt, ValuePropFlags props, int? cardOwnerCid = null)
     {
         if (st.IsEnding) return;
         var t = st.FindC(targetCid);
@@ -1576,7 +1731,8 @@ public static class Program
         decimal num = baseAmt;
         if (props.IsPoweredBlock())
         {
-            num += t.GetPowerAmt("DEXTERITY_POWER");
+            var dexterityOwner = cardOwnerCid.HasValue ? st.FindC(cardOwnerCid.Value) : t;
+            num += dexterityOwner?.GetPowerAmt("DEXTERITY_POWER") ?? 0;
             if (t.HasPower("FRAIL_POWER")) num *= 0.75m;
         }
         num = Math.Max(0m, num);
@@ -1613,95 +1769,7 @@ public static class Program
                 st.NextActionId++;
                 if (pl.Type == "playCard" && pl.CardId.HasValue)
                 {
-                    var p = st.FindP(pid);
-                    var card = p?.Hand.FirstOrDefault(c => c.InstId == pl.CardId.Value);
-                    if (p != null && card != null && p.Energy >= card.Cost)
-                    {
-                        p.Energy -= card.Cost;
-                        p.Hand.Remove(card);
-                        bool upg = card.UpgradeLevel > 0;
-                        decimal DmgOr(int d) => card.BaseDamage == 0 ? (decimal)d : (decimal)card.BaseDamage;
-                        decimal BlkOr(int b) => card.BaseBlock == 0 ? (decimal)b : (decimal)card.BaseBlock;
-                        switch (card.Entry)
-                        {
-                            case "STRIKE_IRONCLAD": case "STRIKE_SILENT": case "STRIKE_DEFECT": case "STRIKE_NECROBINDER": case "STRIKE_REGENT":
-                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 9 : 6), ValuePropFlags.Move);
-                                break;
-                            case "DEFEND_IRONCLAD": case "DEFEND_SILENT": case "DEFEND_DEFECT": case "DEFEND_NECROBINDER": case "DEFEND_REGENT":
-                                WireGainBlock(st, p.Cid, BlkOr(upg ? 8 : 5), ValuePropFlags.Move);
-                                break;
-                            case "BASH":
-                                if (pl.TargetId.HasValue)
-                                {
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 10 : 8), ValuePropFlags.Move);
-                                    WireApplyPower(st, pl.TargetId.Value, "VULNERABLE_POWER", true, false, upg ? 3 : 2);
-                                }
-                                break;
-                            case "TWIN_STRIKE":
-                                if (pl.TargetId.HasValue)
-                                {
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 7 : 5), ValuePropFlags.Move);
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 7 : 5), ValuePropFlags.Move);
-                                }
-                                break;
-                            case "POMMEL_STRIKE":
-                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 10 : 9), ValuePropFlags.Move);
-                                WireDrawCards(st, p, upg ? 2 : 1);
-                                break;
-                            case "IRON_WAVE":
-                                WireGainBlock(st, p.Cid, BlkOr(upg ? 7 : 5), ValuePropFlags.Move);
-                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 7 : 5), ValuePropFlags.Move);
-                                break;
-                            case "CLEAVE":
-                                foreach (var en in st.Creatures.Where(x => x.Side == 2 && x.Hp > 0))
-                                    TApplyDamageHit(st, p.Cid, en.Id, DmgOr(upg ? 11 : 8), ValuePropFlags.Move);
-                                break;
-                            case "CLOTHESLINE":
-                                if (pl.TargetId.HasValue)
-                                {
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 14 : 12), ValuePropFlags.Move);
-                                    WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, upg ? 3 : 2);
-                                }
-                                break;
-                            case "UPPERCUT":
-                                if (pl.TargetId.HasValue)
-                                {
-                                    int amt = upg ? 2 : 1;
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(13), ValuePropFlags.Move);
-                                    WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, amt);
-                                    WireApplyPower(st, pl.TargetId.Value, "VULNERABLE_POWER", true, false, amt);
-                                }
-                                break;
-                            case "BLUDGEON":
-                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 42 : 32), ValuePropFlags.Move);
-                                break;
-                            case "INFLAME":
-                                WireApplyPower(st, p.Cid, "STRENGTH_POWER", false, true, upg ? 3 : 2);
-                                break;
-                            case "FOOTWORK":
-                                WireApplyPower(st, p.Cid, "DEXTERITY_POWER", false, true, upg ? 3 : 2);
-                                break;
-                            case "SHRUG_IT_OFF":
-                                WireGainBlock(st, p.Cid, BlkOr(upg ? 11 : 8), ValuePropFlags.Move);
-                                WireDrawCards(st, p, 1);
-                                break;
-                            case "NEUTRALIZE":
-                                if (pl.TargetId.HasValue)
-                                {
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, DmgOr(upg ? 4 : 3), ValuePropFlags.Move);
-                                    WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, upg ? 2 : 1);
-                                }
-                                break;
-                            default:
-                                if (card.CardType == "attack" && card.BaseDamage > 0 && pl.TargetId.HasValue)
-                                    TApplyDamageHit(st, p.Cid, pl.TargetId.Value, card.BaseDamage, ValuePropFlags.Move);
-                                else if (card.GainsBlock && card.BaseBlock > 0)
-                                    WireGainBlock(st, p.Cid, card.BaseBlock, ValuePropFlags.Move);
-                                break;
-                        }
-                        if (card.CardType != "power") p.Discard.Add(card);
-                        TCheckWin(st);
-                    }
+                    TryPlayCombatCard(st, pid, pl.CardId.Value, pl.TargetId);
                 }
                 else if (pl.Type == "usePotion" && pl.SlotIdx.HasValue)
                 {
@@ -1711,37 +1779,7 @@ public static class Program
                     {
                         string potEntry = p.Potions[slot]!;
                         p.Potions[slot] = null;
-                        switch (potEntry)
-                        {
-                            case "FIRE_POTION":
-                                if (pl.TargetId.HasValue) TApplyDamageHit(st, p.Cid, pl.TargetId.Value, 20m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
-                                break;
-                            case "BLOCK_POTION":
-                                WireGainBlock(st, p.Cid, 12m, ValuePropFlags.Move | ValuePropFlags.Unpowered);
-                                break;
-                            case "STRENGTH_POTION":
-                                WireApplyPower(st, p.Cid, "STRENGTH_POWER", false, true, 2);
-                                break;
-                            case "FEAR_POTION":
-                                if (pl.TargetId.HasValue) WireApplyPower(st, pl.TargetId.Value, "VULNERABLE_POWER", true, false, 3);
-                                break;
-                            case "WEAK_POTION":
-                                if (pl.TargetId.HasValue) WireApplyPower(st, pl.TargetId.Value, "WEAK_POWER", true, false, 3);
-                                break;
-                            case "ENERGY_POTION":
-                                p.Energy = Math.Min(StatCap, p.Energy + 2);
-                                break;
-                            case "SWIFT_POTION":
-                                WireDrawCards(st, p, 3);
-                                break;
-                            case "HEAL_POTION":
-                            {
-                                var selfC = st.FindC(p.Cid);
-                                if (selfC != null && !st.IsEnding && selfC.Hp > 0)
-                                    selfC.Hp = Math.Min(selfC.MaxHp, selfC.Hp + 10);
-                                break;
-                            }
-                        }
+                        ExecPotionEffect(st, p, potEntry, pl.TargetId);
                         TCheckWin(st);
                     }
                 }
@@ -1759,67 +1797,8 @@ public static class Program
                 st.NextActionId++;
             }
         }
-        else if (ev.Kind == "endRoundAndRunEnemies" && st.HasCombat && st.IsInProgress)
-        {
-            foreach (var p in st.Players)
-            {
-                foreach (var c in p.Hand.ToList()) { p.Hand.Remove(c); p.Discard.Add(c); }
-            }
-            st.Side = 2;
-            foreach (var c in st.Creatures.Where(x => x.Side == 2)) c.Block = 0;
-            foreach (var en in st.Creatures.Where(x => x.Side == 2 && x.Hp > 0).ToList())
-            {
-                if (!st.IsInProgress) break;
-                if (en.Entry == "COOP_GUARDIAN")
-                {
-                    string move = en.StateLog.Count == 0 ? (string.IsNullOrEmpty(en.MoveId) ? "SLAM" : en.MoveId) : (en.MoveId == "SLAM" ? "FORTIFY" : "SLAM");
-                    en.MoveId = move;
-                    en.StateLog.Add(move);
-                    if (move == "SLAM")
-                    {
-                        foreach (var ally in st.Creatures.Where(c => c.Side == 1 && c.Hp > 0))
-                            TApplyDamageHit(st, en.Id, ally.Id, 7m, ValuePropFlags.Move);
-                    }
-                    else
-                    {
-                        WireGainBlock(st, en.Id, 8m, ValuePropFlags.Move);
-                        WireApplyPower(st, en.Id, "STRENGTH_POWER", false, true, 1);
-                    }
-                }
-                else if (en.Entry == "CULTIST")
-                {
-                    string move = en.StateLog.Count == 0 ? (string.IsNullOrEmpty(en.MoveId) ? "INCANT" : en.MoveId) : "DARK_STRIKE";
-                    en.MoveId = move;
-                    en.StateLog.Add(move);
-                    if (move == "INCANT")
-                    {
-                        WireApplyPower(st, en.Id, "STRENGTH_POWER", false, true, 3);
-                    }
-                    else
-                    {
-                        var firstAlly = st.Creatures.FirstOrDefault(c => c.Side == 1 && c.Hp > 0);
-                        if (firstAlly != null) TApplyDamageHit(st, en.Id, firstAlly.Id, 6m, ValuePropFlags.Move);
-                    }
-                }
-            }
-            TCheckWin(st);
-            if (st.IsInProgress)
-            {
-                foreach (var p in st.Players) p.TurnNumber++;
-                st.RoundNumber++;
-                st.Side = 1;
-                foreach (var c in st.Creatures.Where(x => x.Side == 1))
-                {
-                    var ow = st.Players.FirstOrDefault(x => x.Cid == c.Id);
-                    if (ow == null || ow.TurnNumber != 1) c.Block = 0;
-                }
-                foreach (var p in st.Players)
-                {
-                    p.Energy = p.BaseMaxEnergy;
-                    WireDrawCards(st, p, 5);
-                }
-            }
-        }
+        else if (ev.Kind == "endRoundAndRunEnemies" && st.HasCombat)
+            RunRound(st, RunTier1Monster);
         else if (ev.Kind == "opaqueStep" && ev.Opaque != null && st.HasCombat)
         {
             var d = ev.Opaque;
@@ -2012,6 +1991,10 @@ public static class Program
             "QUEUE_SET"     => EvalQueueSet(f),
             "TIMELINE_SEEK" => EvalTimelineSeek(f),
             "TRACE_JSON"    => EvalTraceJson(f[1]),
+            "TURN_LIFECYCLE" => EvalTurnLifecycle(f),
+            "TIER2_EFFECTS"  => EvalTier2Effects(f),
+            "TIER2_CARD"     => EvalTier2Card(f),
+            "EXPEDITION"     => EvalExpeditionReference(),
             _               => $"UNKNOWN_OP:{f[0]}"
         };
     }

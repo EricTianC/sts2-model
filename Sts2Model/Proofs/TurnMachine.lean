@@ -18,7 +18,9 @@ namespace Sts2Model.Proofs
 open Sts2Model.Core
 open Sts2Model.Model
 open Sts2Model.Hook
+open Sts2Model.Command
 open Sts2Model.Combat
+open Sts2Model.Mechanics
 
 /-- Legal transitions between `PlayerTurnPhase` states in STS2 combat. -/
 inductive ValidTurnPhaseTransition : PlayerTurnPhase → PlayerTurnPhase → Prop where
@@ -186,5 +188,290 @@ theorem monster_stateMachine_terminates (sm : MonsterStateMachine) (rank : State
     · cases hRes : MonsterStateMachine.rollMoveFuel.loop sm cs owner (maxRank + 2) sm.currentStateId rng with
       | none => rw [hRes] at hLoop; cases hLoop
       | some _ => rfl
+
+/-- Observable per-player orb-queue capacity list in `CombatState`. -/
+def playerOrbCapacities (cs : CombatState) : List (PlayerId × Option Nat) :=
+  cs.players.map fun p => (p.playerId, p.combatState.map (·.orbQueue.capacity))
+
+private theorem updateCreature_preserves_players (cs : CombatState) (cid : CreatureId) (f : Creature → Creature) :
+    (cs.updateCreature cid f).players = cs.players := rfl
+
+private theorem recordHistory_preserves_players (cs : CombatState) (entry : CombatHistoryEntry) :
+    (cs.recordHistory entry).players = cs.players := rfl
+
+private theorem updatePlayer_preserves_orbCapacities (cs : CombatState) (pid : PlayerId) (f : Player → Player)
+    (hPres : ∀ p, (f p).playerId = p.playerId ∧
+      ((f p).combatState.map (·.orbQueue.capacity)) = (p.combatState.map (·.orbQueue.capacity))) :
+    playerOrbCapacities (cs.updatePlayer pid f) = playerOrbCapacities cs := by
+  unfold playerOrbCapacities CombatState.updatePlayer
+  dsimp only
+  rw [List.map_map]
+  congr 1
+  funext p
+  dsimp only [Function.comp_def]
+  split
+  · exact Prod.ext (hPres p).1 (hPres p).2
+  · rfl
+
+private theorem gainBlock_preserves_players (cs : CombatState) (reg : BehaviorRegistry)
+    (tid : CreatureId) (amt : Dec) (props : ValueProp) (cardSource : Option CardInstance)
+    (modSubscribers : List (ModId × ModelId)) :
+    (gainBlock cs reg tid amt props cardSource modSubscribers).1.players = cs.players := by
+  unfold gainBlock
+  split
+  · rfl
+  · split
+    · rfl
+    · split <;> rfl
+
+private theorem foldl_recordHistory_players (xs : List DamageResult) (dealerId : Option CreatureId) (st : CombatState) :
+    (xs.foldl (fun (acc : CombatState) r => acc.recordHistory (.damageDealt acc.roundNumber dealerId r)) st).players = st.players := by
+  induction xs generalizing st with
+  | nil => rfl
+  | cons _ _ ih => exact ih _
+
+private theorem damagePreBlockStage_players (cs : CombatState) (reg : BehaviorRegistry)
+    (orig : Creature) (oid : CreatureId) (amt modAmt : Dec) (props : ValueProp) (d : Option Creature)
+    (card : Option CardInstance) (subs : List (ModId × ModelId)) :
+    (damagePreBlockStage cs reg orig oid amt modAmt props d card subs).1.players = cs.players := by
+  unfold damagePreBlockStage
+  cases (modifyPreBlockDamageTarget cs reg orig amt props d subs).bind cs.findCreature <;> rfl
+
+private theorem damageBlockStage_players (cs1 : CombatState) (bhId : CreatureId)
+    (dmgAfterPre : Dec) (props : ValueProp) :
+    (damageBlockStage cs1 bhId dmgAfterPre props).1.players = cs1.players := by
+  unfold damageBlockStage
+  cases cs1.findCreature bhId <;> rfl
+
+private theorem damageUnblockedStage_players (cs2 : CombatState) (reg : BehaviorRegistry)
+    (ubId origId : CreatureId) (u0 dmgRem bDec : Dec) (blkB fullB : Bool)
+    (props : ValueProp) (d : Option Creature) (card : Option CardInstance) (subs : List (ModId × ModelId)) :
+    (damageUnblockedStage cs2 reg ubId origId u0 dmgRem bDec blkB fullB props d card subs).1.players = cs2.players := by
+  unfold damageUnblockedStage
+  cases cs2.findCreature ubId <;> rfl
+
+private theorem damageOverkillStage_players (cs3 : CombatState) (reg : BehaviorRegistry)
+    (ubId origId : CreatureId) (overkill : Nat) (bDec : Dec) (blkB fullB : Bool)
+    (props : ValueProp) (d : Option Creature) (card : Option CardInstance) (subs : List (ModId × ModelId)) :
+    (damageOverkillStage cs3 reg ubId origId overkill bDec blkB fullB props d card subs).1.players = cs3.players := by
+  unfold damageOverkillStage
+  split
+  · rfl
+  · cases cs3.findCreature origId with
+    | none => rfl
+    | some _ => dsimp only; split <;> rfl
+
+private theorem damageSingleTargetCore_preserves_players (cs : CombatState) (reg : BehaviorRegistry)
+    (tid : CreatureId) (amt : Dec) (props : ValueProp) (dealerId : Option CreatureId)
+    (cardSource : Option CardInstance) (hookType : ModifyDamageHookType)
+    (modSubscribers : List (ModId × ModelId)) :
+    (damageSingleTargetCore cs reg tid amt props dealerId cardSource hookType modSubscribers).1.players = cs.players := by
+  have hLive : ∀ s d, (damageSingleTargetCore.damageLiveDealer dealerId s reg tid amt props d cardSource hookType modSubscribers).1.players = s.players := by
+    intro s d
+    unfold damageSingleTargetCore.damageLiveDealer
+    cases s.findCreature tid with
+    | none => rfl
+    | some originalTarget =>
+        dsimp only
+        cases originalTarget.isDead with
+        | true => rfl
+        | false =>
+            simp only [Bool.false_eq_true, ↓reduceIte]
+            rw [foldl_recordHistory_players, damageOverkillStage_players, damageUnblockedStage_players,
+              damageBlockStage_players, damagePreBlockStage_players]
+  unfold damageSingleTargetCore
+  cases dealerId.bind cs.findCreature with
+  | none => exact hLive cs none
+  | some d =>
+      dsimp only
+      split
+      · rfl
+      · exact hLive cs (some d)
+
+private theorem damageSingleTarget_preserves_players (cs : CombatState) (reg : BehaviorRegistry)
+    (tid : CreatureId) (amt : Dec) (props : ValueProp) (dealerId : Option CreatureId)
+    (cardSource : Option CardInstance) (hookType : ModifyDamageHookType)
+    (modSubscribers : List (ModId × ModelId)) :
+    (damageSingleTarget cs reg tid amt props dealerId cardSource hookType modSubscribers).1.players = cs.players := by
+  unfold damageSingleTarget
+  have hLoop : ∀ (effs : List HookEffect) (acc : CombatState),
+      (effs.foldl (fun s eff =>
+        match eff with
+        | .dealDamage rD rT rA rP => (damageSingleTargetCore s reg rT rA rP rD none ModifyDamageHookType.all modSubscribers).1
+        | _ => s) acc).players = acc.players := by
+    intro effs
+    induction effs with
+    | nil => intro acc; rfl
+    | cons eff _ ih =>
+        intro acc
+        dsimp only [List.foldl]
+        cases eff with
+        | dealDamage rD rT rA rP => rw [ih, damageSingleTargetCore_preserves_players]
+        | _ => exact ih acc
+  rw [damageSingleTargetCore_preserves_players]
+  dsimp only
+  cases hD : dealerId.bind cs.findCreature with
+  | none =>
+      dsimp only
+      cases cs.findCreature tid with
+      | none => rfl
+      | some target =>
+          dsimp only
+          cases hDead : target.isDead with
+          | true => rfl
+          | false => simp only [Bool.false_eq_true, ↓reduceIte]; exact hLoop _ cs
+  | some d =>
+      dsimp only
+      by_cases hDDead : d.isDead = true
+      · simp [hDDead]
+      · have hF : (!!d.isDead) = false := by revert hDDead; cases d.isDead <;> simp
+        simp only [hF, Bool.false_eq_true, ↓reduceIte]
+        cases cs.findCreature tid with
+        | none => rfl
+        | some target =>
+            dsimp only
+            by_cases hTDead : target.isDead = true
+            · simp [hTDead]
+            · simp only [hTDead, Bool.false_eq_true, ↓reduceIte]
+              exact hLoop _ cs
+
+private theorem damage_preserves_players (cs : CombatState) (reg : BehaviorRegistry)
+    (tids : List CreatureId) (amt : Dec) (props : ValueProp) (dealerId : Option CreatureId)
+    (cardSource : Option CardInstance) (hookType : ModifyDamageHookType)
+    (modSubscribers : List (ModId × ModelId)) :
+    (damage cs reg tids amt props dealerId cardSource hookType modSubscribers).1.players = cs.players := by
+  unfold damage
+  have hFold : ∀ (xs : List CreatureId) (acc : CombatState × List DamageResult),
+      (xs.foldl (fun (accState, accRes) tid =>
+        let (s', rs) := damageSingleTarget accState reg tid amt props dealerId cardSource hookType modSubscribers
+        (s', accRes ++ rs)) acc).1.players = acc.1.players := by
+    intro xs
+    induction xs with
+    | nil => intro acc; rfl
+    | cons _ _ ih =>
+        intro acc
+        dsimp only [List.foldl]
+        rw [ih, damageSingleTarget_preserves_players]
+  exact hFold tids (cs, [])
+
+private theorem triggerOrbPassiveWithFocus_preserves_orbCapacities (cs : CombatState)
+    (reg : BehaviorRegistry) (pid : PlayerId) (orb : OrbInstance)
+    (modSubscribers : List (ModId × ModelId)) :
+    playerOrbCapacities (triggerOrbPassiveWithFocus cs reg pid orb modSubscribers) =
+      playerOrbCapacities cs := by
+  unfold triggerOrbPassiveWithFocus
+  cases cs.isEnding with
+  | true => rfl
+  | false =>
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      cases cs.findPlayer pid with
+      | none => rfl
+      | some player =>
+          dsimp only
+          cases orb.kind with
+          | lightning =>
+              dsimp only
+              cases cs.hittableEnemies.head? with
+              | none => rfl
+              | some target =>
+                  dsimp only
+                  unfold playerOrbCapacities
+                  rw [damageSingleTarget_preserves_players]
+          | frost =>
+              dsimp only
+              cases (cs.findCreature player.creatureId |>.map (·.hasPower hibernatePowerModelId) |>.getD false) with
+              | false =>
+                  simp only [Bool.not_false, ↓reduceIte]
+                  unfold playerOrbCapacities
+                  rw [gainBlock_preserves_players]
+              | true =>
+                  simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+                  have hFold : ∀ (ps : List Player) (acc : CombatState),
+                      (ps.foldl (fun s (pl : Player) =>
+                        if pl.playerId == pid then s
+                        else (gainBlock s reg pl.creatureId (effectivePassiveVal (focusAmountOf cs pid) orb) BlockProps.nonCardUnpowered none modSubscribers).1) acc).players = acc.players := by
+                    intro ps
+                    induction ps with
+                    | nil => intro acc; rfl
+                    | cons pl _ ih =>
+                        intro acc
+                        dsimp only [List.foldl]
+                        rw [ih]
+                        split
+                        · rfl
+                        · exact gainBlock_preserves_players _ _ _ _ _ _ _
+                  unfold playerOrbCapacities
+                  rw [hFold, gainBlock_preserves_players]
+          | dark =>
+              apply updatePlayer_preserves_orbCapacities
+              intro p; cases hCs : p.combatState with
+              | none => exact ⟨rfl, by simp [hCs]⟩
+              | some _ => exact ⟨rfl, rfl⟩
+          | plasma =>
+              apply updatePlayer_preserves_orbCapacities
+              intro p; cases hCs : p.combatState with
+              | none => exact ⟨rfl, by simp [hCs]⟩
+              | some _ => exact ⟨rfl, by simp [PlayerCombatState.gainEnergy]⟩
+          | glass =>
+              dsimp only
+              split
+              · rfl
+              · have hDmg : ∀ (s : CombatState) (ts : List CreatureId),
+                    playerOrbCapacities (damage s reg ts (effectivePassiveVal (focusAmountOf cs pid) orb)
+                      DamageProps.nonCardUnpowered (some player.creatureId) none ModifyDamageHookType.all modSubscribers).1 =
+                    playerOrbCapacities s := fun s ts => by
+                  unfold playerOrbCapacities
+                  rw [damage_preserves_players]
+                rw [hDmg]
+                apply updatePlayer_preserves_orbCapacities
+                intro p; cases hCs : p.combatState with
+                | none => exact ⟨rfl, by simp [hCs]⟩
+                | some _ => exact ⟨rfl, rfl⟩
+          | custom _ => rfl
+
+/-- Executing turn-end orb passives never modifies any player's orb slot capacity. -/
+theorem orb_turn_end_passives_preserve_capacity (cs : CombatState) (reg : BehaviorRegistry)
+    (pid : PlayerId) (modSubscribers : List (ModId × ModelId)) :
+    playerOrbCapacities (triggerTurnEndOrbs cs reg pid modSubscribers) =
+      playerOrbCapacities cs := by
+  unfold triggerTurnEndOrbs
+  cases hPcs : (cs.findPlayer pid |>.bind (·.combatState)) with
+  | none => rfl
+  | some pcs =>
+      dsimp only
+      have hFold : ∀ (os : List OrbInstance) (acc : CombatState),
+          playerOrbCapacities (os.foldl (fun s o =>
+            if o.kind != .plasma then triggerOrbPassiveWithFocus s reg pid o modSubscribers else s) acc) =
+          playerOrbCapacities acc := by
+        intro os
+        induction os with
+        | nil => intro acc; rfl
+        | cons o _ ih =>
+            intro acc
+            dsimp only [List.foldl]
+            rw [ih]
+            split
+            · exact triggerOrbPassiveWithFocus_preserves_orbCapacities acc reg pid o modSubscribers
+            · rfl
+      exact hFold pcs.orbQueue.orbs cs
+
+/-- `runSideTurnEndLifecycle` is a no-op when combat is no longer in progress. -/
+theorem runSideTurnEndLifecycle_noop_when_not_in_progress (cs : CombatState) (reg : BehaviorRegistry)
+    (side : CombatSide) (modSubscribers : List (ModId × ModelId))
+    (hStopped : cs.isInProgress = false) :
+    runSideTurnEndLifecycle cs reg side modSubscribers = (cs, .ongoing) := by
+  simp [runSideTurnEndLifecycle, hStopped]
+
+/-- When Ascension value ≥ Base value, `AscensionVal.eval` is monotone in Ascension level. -/
+theorem ascensionVal_eval_monotone_when_asc_ge_base (v : AscensionVal) (a b : Nat)
+    (hle : a ≤ b) (hAscGe : v.baseVal ≤ v.ascVal) :
+    v.eval a ≤ v.eval b := by
+  unfold AscensionVal.eval
+  by_cases ha : a ≥ v.threshold
+  · have hb : b ≥ v.threshold := by omega
+    simp [ha, hb]
+  · by_cases hb : b ≥ v.threshold
+    · simp [ha, hb, hAscGe]
+    · simp [ha, hb]
 
 end Sts2Model.Proofs

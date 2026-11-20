@@ -1,18 +1,13 @@
 /-
   Executable Simulator & `.NET 9` Differential Test Runner (`lake exe sts2sim`).
-  Modes:
-    1. Default (`lake exe sts2sim`):
-       Runs all 49 executable assertions (30 Vanilla + 4 ModTemplates + 3 Catalog + 10 Timeline + 2 ReplayAnalyzerExample), exits 0 iff 100% pass.
-    2. Timeline demo (`lake exe sts2sim --timeline-demo`):
-       Prints the headless multiplayer timeline reconstruction & downstream analyzer example report.
-    3. Export sample JSON trace (`lake exe sts2sim --export-sample-trace <out.json>`):
-       Serializes a versioned `WireTraceBundle` (`schemaVersion = 1`) for external/C# consumption.
-    4. Inspect / verify external JSON trace (`lake exe sts2sim --inspect <trace.json> [--seek <k>] [--viewer <pid>] [--verify]`):
-       Reconstructs timeline state headlessly, switches viewer, and verifies FNV-1a checksums.
-    5. Differential oracle mode (`lake exe sts2sim --diff <input.tsv>`):
-       Evaluates all 12 deterministic test families row-by-row for comparison with `DiffTest/Sts2Oracle`.
+  Default: executable regression suite. `--diff` runs the .NET reference vectors.
+  `--inspect` and `--export-sample-trace` use wire schema v1.
+  `--observe-combat` replays scoped observations; native save audits do not simulate.
 -/
 import Sts2Model
+import Sts2Sim.ObservedCombat
+import Sts2Sim.RunHistoryAudit
+import Sts2Sim.ActMapAudit
 
 open Sts2Model.Core
 open Sts2Model.Model
@@ -25,6 +20,7 @@ open Sts2Model.Replay
 open Sts2Model.Mechanics
 open Sts2Model.Run
 open Sts2Model.Catalog
+open Sts2Model.Sim.Generated
 open Sts2Model.Examples
 open Sts2Model.Examples.ReplayAnalyzer
 
@@ -413,25 +409,325 @@ private def evalTraceJson (fields : List String) : String :=
             , ((c.findPlayer 2).bind Player.combatState).map PlayerCombatState.energy |>.getD 0 )
       s!"{eHp},{p1Hp},{p2Hp},{p1E},{p2E}|{c0},{cMid},{cFin}|{if rtOk then 1 else 0}"
 
+private def diffPowerTemplate (entry : String) (ownerId : CreatureId := 0) : PowerInstance :=
+  match entry with
+  | "VULNERABLE_POWER" | "WEAK_POWER" | "FRAIL_POWER" | "POISON_POWER" | "DOOM_POWER" =>
+      { instanceId := 0, modelId := ModelId.mkPower entry, ownerId := ownerId
+      , powerType := .debuff, stackType := .counter, allowNegative := false, amount := 1 }
+  | "STRENGTH_POWER" | "DEXTERITY_POWER" | "FOCUS_POWER" =>
+      { instanceId := 0, modelId := ModelId.mkPower entry, ownerId := ownerId
+      , powerType := .buff, stackType := .counter, allowNegative := true, amount := 1 }
+  | "BARRICADE_POWER" =>
+      { instanceId := 0, modelId := ModelId.mkPower entry, ownerId := ownerId
+      , powerType := .buff, stackType := .single, allowNegative := false, amount := 1 }
+  | _ =>
+      { instanceId := 0, modelId := ModelId.mkPower entry, ownerId := ownerId
+      , powerType := .buff, stackType := .counter, allowNegative := false, amount := 1 }
+
+private def parseDiffPowerList (s : String) (ownerId : CreatureId) (startInst : Nat) : List PowerInstance :=
+  if s.trimAscii.isEmpty then []
+  else
+    let toks := (s.splitOn ",").map (fun x => x.trimAscii.toString) |>.filter (!·.isEmpty)
+    toks.zipIdx.map fun (tok, i) =>
+      let ps := tok.splitOn ":"
+      let entry := ps[0]?.getD "STRENGTH_POWER"
+      let amt := parseInt! (ps[1]?.getD "1")
+      { diffPowerTemplate entry ownerId with instanceId := startInst + i, amount := amt }
+
+private def formatDiffPowerList (pows : List PowerInstance) : String :=
+  if pows.isEmpty then "-"
+  else String.intercalate ";" (pows.map fun p =>
+    s!"{p.modelId.entry}:{p.amount}:{if p.skipNextDurationTick then 1 else 0}")
+
+private def orbKindTag : OrbKind → String
+  | .lightning => "lightning"
+  | .frost     => "frost"
+  | .dark      => "dark"
+  | .plasma    => "plasma"
+  | .glass     => "glass"
+  | .custom s  => s
+
+private def parseDiffOrbs (s : String) (startInst : Nat) : List OrbInstance :=
+  if s.trimAscii.isEmpty then []
+  else
+    let toks := (s.splitOn ",").map (fun x => x.trimAscii.toString) |>.filter (!·.isEmpty)
+    toks.zipIdx.map fun (tok, i) =>
+      let ps := tok.splitOn ":"
+      let kdStr := ps[0]?.getD "lightning"
+      let kd : OrbKind := match kdStr with
+        | "frost"  => .frost
+        | "dark"   => .dark
+        | "plasma" => .plasma
+        | "glass"  => .glass
+        | _        => .lightning
+      let baseO := OrbInstance.mkDefault (startInst + i) kd
+      let pVal := match ps[1]? with | some v => Dec.ofInt (parseInt! v) | none => baseO.basePassive
+      let eVal := match ps[2]? with | some v => Dec.ofInt (parseInt! v) | none => baseO.baseEvoke
+      { baseO with basePassive := pVal, baseEvoke := eVal }
+
+private def evalTurnLifecycle (fields : List String) : String :=
+  let monsterMode := parseNat! (fields[1]?.getD "0")
+  let p1Hp := parseNat! (fields[2]?.getD "80")
+  let p1Blk := parseNat! (fields[3]?.getD "0")
+  let p1Pows := parseDiffPowerList (fields[4]?.getD "") 101 10
+  let p1Orbs := parseDiffOrbs (fields[5]?.getD "") 1
+  let e1Hp := parseNat! (fields[6]?.getD "40")
+  let e1Blk := parseNat! (fields[7]?.getD "0")
+  let e1Pows := parseDiffPowerList (fields[8]?.getD "") 200 50
+  let actsStr := fields[9]?.getD ""
+  let acts := if actsStr.trimAscii.isEmpty then [] else (actsStr.splitOn ";").map (·.trimAscii.toString) |>.filter (!·.isEmpty)
+  let (mEntry, initMove) := match monsterMode with
+    | 1 => ("LC_ATK_VULN", "HIT")
+    | 2 => ("LC_RITUAL", "BUFF")
+    | 3 => ("LC_DEBUFF", "HEX")
+    | _ => ("LC_PASS", "NOP")
+  let bp : MonsterBlueprint :=
+    match monsterMode with
+    | 1 =>
+        { modelId := ModelId.mkMonster "LC_ATK_VULN"
+        , stateMachine := { initialStateId := "HIT", currentStateId := "HIT", nodes := fun sid => if sid == "HIT" then some { id := "HIT", kind := .move "HIT" true false } else none }
+        , moveEffects := fun _ => [.dealDamage .allAllies (Dec.ofInt 5) 1 DamageProps.monsterMove, .applyPower .allAllies (mkVulnerablePower 1) (Dec.ofInt 1)] }
+    | 2 =>
+        { modelId := ModelId.mkMonster "LC_RITUAL"
+        , stateMachine :=
+            { initialStateId := "BUFF", currentStateId := "BUFF"
+            , nodes := fun sid =>
+                if sid == "BUFF" then some { id := "BUFF", kind := .move "HIT" true true }
+                else if sid == "HIT" then some { id := "HIT", kind := .move "HIT" true false }
+                else none }
+        , moveEffects := fun mid =>
+            if mid == "BUFF" then [.applyPower .self (mkRitualPower 1) (Dec.ofInt 2)]
+            else [.dealDamage .allAllies (Dec.ofInt 4) 1 DamageProps.monsterMove] }
+    | 3 =>
+        { modelId := ModelId.mkMonster "LC_DEBUFF"
+        , stateMachine := { initialStateId := "HEX", currentStateId := "HEX", nodes := fun sid => if sid == "HEX" then some { id := "HEX", kind := .move "HEX" true false } else none }
+        , moveEffects := fun _ => [.applyPower .allAllies (mkWeakPower 1) (Dec.ofInt 1), .applyPower .allAllies (mkFrailPower 1) (Dec.ofInt 1)] }
+    | _ =>
+        { modelId := ModelId.mkMonster "LC_PASS"
+        , stateMachine := { initialStateId := "NOP", currentStateId := "NOP", nodes := fun sid => if sid == "NOP" then some { id := "NOP", kind := .move "NOP" true false } else none }
+        , moveEffects := fun _ => [] }
+  let lcEnv : EffectEnv := { tier1EffectEnv with monsterBlueprint := fun mid => if mid.entry == mEntry then some bp else none }
+  let drawCards := (List.range 15).map fun i =>
+    { instanceId := 1001 + i, modelId := ModelId.mkCard "STRIKE_IRONCLAD", ownerId := 1
+    , cardType := .attack, rarity := .basic, targetType := .anyEnemy
+    , energyCost := CardEnergyCost.mkCanonical 1 : CardInstance }
+  let cP1 : Creature := { id := 101, modelId := ModelId.mkCharacter "DEFECT", side := .player, playerId := some 1, currentHp := p1Hp, maxHp := max 80 p1Hp, block := p1Blk, powers := p1Pows }
+  let cE1 : Creature := { id := 200, modelId := ModelId.mkMonster mEntry, side := .enemy, currentHp := e1Hp, maxHp := max 80 e1Hp, block := e1Blk, powers := e1Pows, monster := some { modelId := ModelId.mkMonster mEntry, currentMoveId := initMove } }
+  let cap := if p1Orbs.isEmpty then 3 else max 3 p1Orbs.length
+  let p1 : Player :=
+    { playerId := 1, creatureId := 101, characterId := ModelId.mkCharacter "DEFECT", baseOrbSlots := cap
+    , combatState := some { energy := 3, baseMaxEnergy := 3, orbQueue := { capacity := cap, orbs := p1Orbs }, piles := { draw := drawCards } } }
+  let cs0 : CombatState :=
+    { combatId := 1, roundNumber := 1, currentSide := .player, isInProgress := true
+    , allies := [cP1], enemies := [cE1], players := [p1], rng := Rng.ofSeed 12345, nextInstanceId := 2000 }
+  let csFinal := acts.foldl (fun s tok =>
+    if !s.isInProgress then s
+    else if tok == "P_STRIKE" then
+      let (s1, _, _, _) := execEffectProgram lcEnv s (some 1) 101 (some 200) none 0 [] [.dealDamage .chosenTarget (Dec.ofInt 6) 1 DamageProps.card]
+      (checkWinCondition (checkAllPlayersDead s1) (lcEnv.behaviorReg s1) []).1
+    else if tok == "P_UNPOW" then
+      let (s1, _, _, _) := execEffectProgram lcEnv s (some 1) 101 (some 200) none 0 [] [.dealDamage .chosenTarget (Dec.ofInt 6) 1 DamageProps.nonCardUnpowered]
+      (checkWinCondition (checkAllPlayersDead s1) (lcEnv.behaviorReg s1) []).1
+    else if tok.startsWith "P_VULN:" then
+      let amt := parseInt! ((tok.splitOn ":")[1]?.getD "1")
+      let (s1, _) := applyPower s (lcEnv.behaviorReg s) (mkVulnerablePower 1) 200 (Dec.ofInt amt) (some 101)
+      s1
+    else if tok == "END_ROUND" then
+      (execEnemyTurnHeadless lcEnv s).1
+    else s) cs0
+  let cp1 := csFinal.findCreature 101
+  let ce1 := csFinal.findCreature 200
+  let pp1 := csFinal.findPlayer 1 |>.bind (·.combatState)
+  let p1Eng := pp1.map (·.energy) |>.getD 0
+  let orbsStr := match (pp1.map (·.orbQueue.orbs)).getD [] with
+    | [] => "-"
+    | os => String.intercalate ";" (os.map fun (o : OrbInstance) => s!"{orbKindTag o.kind}:{o.basePassive.truncate}:{o.baseEvoke.truncate}")
+  s!"{cp1.map (·.currentHp) |>.getD 0},{cp1.map (·.block) |>.getD 0},{p1Eng},{formatDiffPowerList (cp1.map (·.powers) |>.getD [])}|{ce1.map (·.currentHp) |>.getD 0},{ce1.map (·.block) |>.getD 0},{if csFinal.isInProgress then 1 else 0},{formatDiffPowerList (ce1.map (·.powers) |>.getD [])}|{orbsStr}"
+
+private def evalTier2Effects (fields : List String) : String :=
+  let kind := fields[1]?.getD "CARD"
+  let entry := fields[2]?.getD ""
+  let param := parseNat! (fields[3]?.getD "0")
+  let asc := parseNat! (fields[4]?.getD "0")
+  let pStr := parseInt! (fields[5]?.getD "0")
+  let eHp := max 1 (parseNat! (fields[6]?.getD "80"))
+  let eBlk := parseNat! (fields[7]?.getD "0")
+  let pPowsRaw := parseDiffPowerList (fields[8]?.getD "") 101 10
+  let ePows := parseDiffPowerList (fields[9]?.getD "") 200 50
+  let pPows := if pStr != 0 then { mkStrengthPower pStr 101 with instanceId := 9 } :: pPowsRaw else pPowsRaw
+  let mkSimple (cid : Nat) (e : String) : CardInstance :=
+    { instanceId := cid, modelId := ModelId.mkCard e, ownerId := 1
+    , cardType := .attack, rarity := .basic, targetType := .anyEnemy
+    , energyCost := CardEnergyCost.mkCanonical 1 }
+  let initHand := (List.range 5).map fun i => mkSimple (1001 + i) "STRIKE_IRONCLAD"
+  let initDraw := (List.range 10).map fun i => mkSimple (1011 + i) "DEFEND_IRONCLAD"
+  let initDisc := (List.range 2).map fun i => mkSimple (1021 + i) "BASH"
+  let cP1 : Creature := { id := 101, modelId := ModelId.mkCharacter "DEFECT", side := .player, playerId := some 1, currentHp := 70, maxHp := 80, powers := pPows }
+  let cE1 : Creature :=
+    { id := 200, modelId := ModelId.mkMonster (if kind == "MONSTER" then entry else "BIG_DUMMY"), side := .enemy
+    , currentHp := eHp, maxHp := max 120 eHp, block := eBlk, powers := ePows
+    , monster := if kind == "MONSTER" then some { modelId := ModelId.mkMonster entry } else none }
+  let p1 : Player :=
+    { playerId := 1, creatureId := 101, characterId := ModelId.mkCharacter "DEFECT", baseOrbSlots := 3
+    , combatState := some
+        { energy := 5, baseMaxEnergy := 3, stars := 2, turnNumber := 1
+        , orbQueue := { capacity := 3 }
+        , piles := { hand := initHand, draw := initDraw, discard := initDisc } } }
+  let cs0 : CombatState :=
+    { combatId := 1, roundNumber := 1, currentSide := .player, isInProgress := true
+    , ascensionLevel := asc, allies := [cP1], enemies := [cE1], players := [p1]
+    , rng := Rng.ofSeed 424242, nextInstanceId := 2000 }
+  let csFinal :=
+    if kind == "CARD" then
+      let dummy : CardInstance :=
+        { instanceId := 999, modelId := ModelId.mkCard entry, ownerId := 1
+        , cardType := .attack, rarity := .common, targetType := .anyEnemy
+        , energyCost := CardEnergyCost.mkCanonical 1, upgradeLevel := if param > 0 then 1 else 0 }
+      let prog := fullVanillaEffectEnv.cardEffect dummy
+      let (cs1, _, _, _) := execEffectProgram fullVanillaEffectEnv cs0 (some 1) 101 (some 200) (some dummy) 0 [] prog
+      (checkWinCondition (checkAllPlayersDead cs1) (fullVanillaEffectEnv.behaviorReg cs1) []).1
+    else if kind == "POTION" then
+      let prog := fullVanillaEffectEnv.potionEffect (ModelId.mkPotion entry)
+      let (cs1, _, _, _) := execEffectProgram fullVanillaEffectEnv cs0 (some 1) 101 (some 200) none 0 [] prog
+      (checkWinCondition (checkAllPlayersDead cs1) (fullVanillaEffectEnv.behaviorReg cs1) []).1
+    else if kind == "MONSTER" then
+      let rounds := max 1 (min 5 param)
+      (List.range rounds).foldl (fun s _ =>
+        if !s.isInProgress then s else (execEnemyTurnHeadless fullVanillaEffectEnv s).1) cs0
+    else cs0
+  let cp1 := csFinal.findCreature 101
+  let ce1 := csFinal.findCreature 200
+  let pp1 := csFinal.findPlayer 1 |>.bind (·.combatState)
+  let hand := pp1.map (·.piles.hand) |>.getD []
+  let draw := pp1.map (·.piles.draw) |>.getD []
+  let disc := pp1.map (·.piles.discard) |>.getD []
+  let exh := pp1.map (·.piles.exhaust) |>.getD []
+  let orbCnt := (pp1.map (·.orbQueue.orbs.length)).getD 0
+  let eMove := (ce1.bind (·.monster)).map (·.currentMoveId) |>.getD ""
+  let handStr := if hand.isEmpty then "-" else String.intercalate "," (hand.map (·.modelId.entry))
+  let found := match kind with
+    | "CARD" => allGeneratedCards.any (·.id == entry)
+    | "POTION" => allGeneratedPotions.any (·.id == entry)
+    | "MONSTER" => allGeneratedMonsters.any (·.id == entry)
+    | _ => false
+  s!"{cp1.map (·.currentHp) |>.getD 0},{cp1.map (·.block) |>.getD 0},{pp1.map (·.energy) |>.getD 0},{pp1.map (·.stars) |>.getD 0},{hand.length},{draw.length},{disc.length},{exh.length},{orbCnt},{csFinal.allies.length}|{ce1.map (·.currentHp) |>.getD 0},{ce1.map (·.block) |>.getD 0},{eMove},{if csFinal.isInProgress then 1 else 0}|{formatDiffPowerList (cp1.map (·.powers) |>.getD [])}|{formatDiffPowerList (ce1.map (·.powers) |>.getD [])}|{handStr}|found={if found then 1 else 0}"
+
+private def evalTier2Card (fields : List String) : String := Id.run do
+  let arg := fun i => fields[i]?.getD "-"
+  let num := fun i => parseNat! (arg i)
+  let mode := arg 1
+  let entry := arg 2
+  let ct := match arg 5 with | "attack" => CardType.attack | "power" => .power | _ => .skill
+  let (tt, target) := match arg 6 with
+    | "A" => (TargetType.anyAlly, 102)
+    | "E" => (.anyEnemy, 200)
+    | _ => (.self, 101)
+  let card : CardInstance :=
+    { instanceId := 999, modelId := ModelId.mkCard entry, ownerId := 1
+      cardType := ct, rarity := .uncommon, targetType := tt, upgradeLevel := num 3
+      keywords := if num 7 == 1 then [.exhaust] else []
+      energyCost := CardEnergyCost.mkCanonical (Int.ofNat (num 4)) }
+  let basic := fun id entry (ct : CardType) (cost : Int) =>
+    { instanceId := id, modelId := ModelId.mkCard entry, ownerId := 1
+      cardType := ct, rarity := .basic, targetType := if ct == .attack then .anyEnemy else .self
+      energyCost := CardEnergyCost.mkCanonical cost : CardInstance }
+  let tail := (if entry == "MODDED" then [{ card with instanceId := 998 }] else []) ++
+    (match arg 12 with
+      | "skill" => [basic 1001 "DEFEND_IRONCLAD" .skill 1]
+      | "attack" => [basic 1001 "STRIKE_IRONCLAD" .attack 1]
+      | _ => [])
+  let draw := (List.range 7).map (fun i => basic (1011 + i) "DEFEND_IRONCLAD" .skill 1)
+  let discard := (List.range (num 11)).map (fun i => basic (1021 + i) "BASH" .attack 2)
+  let powers := fun i cid id => if arg i == "-" then [] else parseDiffPowerList (arg i) cid id
+  let begin (fresh : Bool) (hp allyHp : Nat) : CombatState :=
+    let pc : Creature :=
+      { id := 101, modelId := ModelId.mkCharacter "DEFECT", side := .player, playerId := some 1
+        currentHp := hp, maxHp := 80, block := if fresh then 0 else num 9
+        powers := if fresh then [] else powers 15 101 10 }
+    let ally : Creature :=
+      { id := 102, modelId := ModelId.mkCharacter "SILENT", side := .player, playerId := some 2
+        currentHp := allyHp, maxHp := 80, block := if fresh then 0 else num 10
+        powers := if fresh then [] else powers 16 102 30 }
+    let m := ModelId.mkMonster (if mode == "ROUND" then "LC_PASS" else "BIG_DUMMY")
+    let enemyHp := if mode == "NEXT" && !fresh then 6 else 80
+    let enemy : Creature :=
+      { id := 200, modelId := m, side := .enemy, currentHp := enemyHp, maxHp := enemyHp
+        powers := if fresh then [] else powers 17 200 50
+        monster := some { modelId := m, currentMoveId := "PASS" } }
+    let player : Player :=
+      { playerId := 1, creatureId := 101, characterId := pc.modelId
+        combatState := some
+          { energy := if fresh then 3 else num 8
+            orbQueue :=
+              { capacity := if fresh then 3 else num 13
+                orbs := if fresh || arg 14 == "-" then [] else parseDiffOrbs (arg 14) 1 }
+            piles := { hand := card :: tail, draw := draw, discard := discard } } }
+    let other : Player :=
+      { playerId := 2, creatureId := 102, characterId := ally.modelId
+        combatState := some { energy := 3 } }
+    { allies := [pc, ally], enemies := [enemy], players := [player, other]
+      rng := Rng.ofSeed 424242, nextInstanceId := 2000 }
+  let pass : MonsterBlueprint :=
+    { modelId := ModelId.mkMonster "LC_PASS"
+      stateMachine :=
+        { initialStateId := "PASS", currentStateId := "PASS"
+          nodes := fun _ => some {id := "PASS", kind := .move "PASS" true false} }
+      moveEffects := fun _ => [] }
+  let env := { fullVanillaEffectEnv with monsterBlueprint := fun _ => some pass }
+  let cs := begin false 70 70
+  let some ops := lookupGeneratedCard entry (num 3 > 0) | return s!"MISSING_GENERATED_CARD:{entry}"
+  let (ok, played) := if mode == "EFFECT" then
+    let ready := cs.updatePlayer 1 fun p => { p with combatState := p.combatState.map fun pcs =>
+      { pcs with piles := { pcs.piles with hand := tail, play := [card] } } }
+    (true, (execEffectProgram env ready (some 1) 101 (some target) (some card) 0 [] ops).1)
+  else
+    let r := execPlayCardHeadless env cs 1 999 (some target)
+    (r.accepted && r.pending.isNone, r.combat)
+  let value := fun (s : CombatState) id => (s.findCreature id).getD default
+  let mut result := played
+  if ok && mode == "NEXT" then
+    let win := execPlayCardHeadless env played 1 1001 (some 200)
+    unless win.outcome == .victory do return "NEXT_DID_NOT_WIN"
+    result := begin true (value win.combat 101).currentHp (value win.combat 102).currentHp
+  else if ok && mode == "ROUND" then
+    result := (execEnemyTurnHeadless env played).1
+  let p := (result.findPlayer 1 |>.bind (·.combatState)).getD default
+  let me := value result 101
+  let ally := value result 102
+  let enemy := value result 200
+  let joined := fun (xs : List String) => if xs.isEmpty then "-" else String.intercalate "," xs
+  let pile := fun (xs : List CardInstance) =>
+    joined (xs.map fun c => s!"{c.instanceId}:{c.energyCost.getWithModifiers c.isCanonical}")
+  return String.intercalate "|"
+    [ if ok then "1" else "0", s!"{me.currentHp},{me.block},{p.energy},{p.orbQueue.capacity}"
+    , s!"{ally.currentHp},{ally.block}", s!"{enemy.currentHp},{enemy.block}"
+    , formatDiffPowerList me.powers, formatDiffPowerList ally.powers, formatDiffPowerList enemy.powers
+    , joined (p.orbQueue.orbs.map (fun o => orbKindTag o.kind))
+    , pile p.piles.hand, pile p.piles.draw, pile p.piles.discard, pile p.piles.exhaust, pile p.piles.play ]
+
 private def evalDiffLine (line : String) : String :=
   let trimmed := line.trimAscii.toString
   if trimmed.isEmpty then ""
   else
     let fields := trimmed.splitOn "\t"
     match fields[0]? with
-    | some "RNG_SEQ"       => evalRngSeq (fields[1]?.getD "0") (fields[2]?.getD "0")
-    | some "RNG_SHUFFLE"   => evalRngShuffle (fields[1]?.getD "0") (fields[2]?.getD "")
-    | some "DMG_PIPE"      => evalDmgPipe fields
-    | some "BLK_PIPE"      => evalBlkPipe fields
-    | some "CREATURE_DMG"  => evalCreatureDmg fields
-    | some "POWER_STACK"   => evalPowerStack fields
-    | some "CARD_COST"     => evalCardCost fields
-    | some "RARITY_ODDS"   => evalRarityOdds fields
-    | some "MOD_SORT"      => evalModSort fields
-    | some "QUEUE_SET"     => evalQueueSet fields
-    | some "TIMELINE_SEEK" => evalTimelineSeek fields
-    | some "TRACE_JSON"    => evalTraceJson fields
-    | _                    => s!"UNKNOWN_OP:{fields[0]?.getD ""}"
+    | some "RNG_SEQ"        => evalRngSeq (fields[1]?.getD "0") (fields[2]?.getD "0")
+    | some "RNG_SHUFFLE"    => evalRngShuffle (fields[1]?.getD "0") (fields[2]?.getD "")
+    | some "DMG_PIPE"       => evalDmgPipe fields
+    | some "BLK_PIPE"       => evalBlkPipe fields
+    | some "CREATURE_DMG"   => evalCreatureDmg fields
+    | some "POWER_STACK"    => evalPowerStack fields
+    | some "CARD_COST"      => evalCardCost fields
+    | some "RARITY_ODDS"    => evalRarityOdds fields
+    | some "MOD_SORT"       => evalModSort fields
+    | some "QUEUE_SET"      => evalQueueSet fields
+    | some "TIMELINE_SEEK"  => evalTimelineSeek fields
+    | some "TRACE_JSON"     => evalTraceJson fields
+    | some "TURN_LIFECYCLE" => evalTurnLifecycle fields
+    | some "TIER2_EFFECTS"  => evalTier2Effects fields
+    | some "TIER2_CARD"     => evalTier2Card fields
+    | some "EXPEDITION"     => expeditionReferenceProjection
+    | _                     => s!"UNKNOWN_OP:{fields[0]?.getD ""}"
 
 private structure InspectOpts where
   seekStep : Option Nat := none
@@ -464,7 +760,7 @@ private def runInspectCommand (tracePath : String) (optArgs : List String) : IO 
           IO.eprintln s!"Trace JSON parse error: {e}"
           return 1
       | .ok bundle =>
-          match decodeArchiveBundle vanillaEffectEnv bundle with
+          match decodeArchiveBundle fullVanillaEffectEnv bundle with
           | .error e =>
               IO.eprintln s!"Trace bundle decode error: {e}"
               return 1
@@ -474,25 +770,28 @@ private def runInspectCommand (tracePath : String) (optArgs : List String) : IO 
                 | none   => baseArch
               let mut exitCode : UInt32 := 0
               if opts.doVerify then
-                let audit := verifyTraceChecksums vanillaEffectEnv arch bundle.expectedChecksums
+                let audit := verifyTraceChecksums fullVanillaEffectEnv arch bundle.expectedChecksums
                 IO.println s!"ChecksumsVerified={audit.allMatched} (checked={audit.totalChecked}, mismatches={audit.mismatches.length})"
                 if !audit.allMatched then
                   for m in audit.mismatches do
                     IO.eprintln s!"  Checksum mismatch at step #{m.eventIndex}: expected={m.expected}, actual={m.actual}"
                   exitCode := 1
               match opts.seekStep with
-              | some k => IO.println (inspectArchiveStep vanillaEffectEnv arch k)
-              | none   => IO.println (formatTimelineSummary vanillaEffectEnv arch)
+              | some k => IO.println (inspectArchiveStep fullVanillaEffectEnv arch k)
+              | none   => IO.println (formatTimelineSummary fullVanillaEffectEnv arch)
               return exitCode
 
 private def runRegressionSuite : IO UInt32 := do
   let catalogTests : List (String × Bool) :=
     [ ("catalog_cards_717", allCards.length == 717)
     , ("catalog_relics_316", allRelics.length == 316)
-    , ("catalog_powers_304", allPowers.length == 304) ]
+    , ("catalog_powers_304", allPowers.length == 304)
+    , ("tier2_cards_373", allGeneratedCards.length == 373)
+    , ("tier2_potions_36", allGeneratedPotions.length == 36)
+    , ("tier2_monsters_19", allGeneratedMonsters.length == 19) ]
   let suite :=
     allVanillaTests ++ allModTemplateTests ++ catalogTests ++ allTimelineTests ++
-      allReplayAnalyzerExampleTests
+      allReplayAnalyzerExampleTests ++ allExpeditionTests
   let mut failed : Nat := 0
   for (name, ok) in suite do
     if ok then
@@ -520,6 +819,12 @@ def main (args : List String) : IO UInt32 := do
       IO.FS.writeFile outPath (serializeTraceJson sampleTraceBundle true)
       IO.println s!"Exported sample trace bundle (schemaVersion={traceSchemaVersion}) to {outPath}"
       return 0
+  | ["--observe-combat", path] =>
+      Sts2Sim.ObservedCombat.run path
+  | ["--audit-run-history", path] =>
+      Sts2Sim.RunHistoryAudit.run path
+  | ["--audit-act-map", path] =>
+      Sts2Sim.ActMapAudit.run path
   | "--inspect" :: tracePath :: rest =>
       runInspectCommand tracePath rest
   | _ =>

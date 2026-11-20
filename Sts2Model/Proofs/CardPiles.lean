@@ -249,11 +249,9 @@ theorem moveCard_preserves_invariant (piles : PlayerPiles) (cid : CardInstanceId
 
 /-- Shuffling discard into draw preserves total combat card count and `CombatPileInvariant`.
     Ref: `CardPileCmd.Shuffle`. -/
-theorem shuffleDiscardIntoDraw_totalCount (piles : PlayerPiles) (rng : Rng) :
-    (shuffleDiscardIntoDraw piles rng).1.totalCount = piles.totalCount := by
-  unfold shuffleDiscardIntoDraw PlayerPiles.totalCount
-  simp only [Rng.unstableShuffle_length, List.length_append, List.length_nil]
-  omega
+theorem shuffleDiscardIntoDraw_totalCount (piles : PlayerPiles) (rng : Rng) (stable : Bool := false) :
+    (shuffleDiscardIntoDraw piles rng stable).1.totalCount = piles.totalCount := by
+  cases stable <;> simp [shuffleDiscardIntoDraw, PlayerPiles.totalCount, Rng.unstableShuffle_length] <;> omega
 
 theorem shuffleDiscardIntoDraw_preserves_invariant (piles : PlayerPiles) (rng : Rng)
     (hInv : CombatPileInvariant piles) :

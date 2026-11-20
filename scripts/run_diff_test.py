@@ -2,7 +2,7 @@
 """
 Cross-language `.NET 9` <-> Lean 4 differential tester for Slay the Spire 2 logic model.
 
-Generates 850 randomized and adversarial edge-case test vectors across 12 test families:
+Generates randomized and fixed edge-case vectors across 15 test families:
   1. RNG_SEQ       (SplitMix64 + Xoshiro256** bit-exact stream & IEEE-754 double bits)
   2. RNG_SHUFFLE   (UnstableShuffle Fisher-Yates child-RNG permutation)
   3. DMG_PIPE      (Hook.ModifyDamageInternal: Strength, Weak, Vulnerable, PaperPhrog, LateMul, Cap)
@@ -15,13 +15,16 @@ Generates 850 randomized and adversarial edge-case test vectors across 12 test f
  10. QUEUE_SET     (Multiplayer ActionQueueSet concurrent queues, pause/choice/resume/cancel)
  11. TIMELINE_SEEK (Multi-player combat replay, FNV-1a 64-bit state checksum, & keyframe seek)
  12. TRACE_JSON    (Versioned external trace JSON codec, 64-bit string seeds/checksums, & interop)
+ 13. TURN_LIFECYCLE (Round hooks, power durations, damage reactions, and orb passives)
+ 14. TIER2_EFFECTS (Layered card, potion, and monster effect execution and table lookup)
+ 15. TIER2_CARD    (Runtime operands, actual card payment and piles, and combat-local modifiers)
+ 16. EXPEDITION    (Explicit two-act route, rewards, and combat persistence)
 
 Run via: `uv run python scripts/run_diff_test.py`
 """
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import random
 import subprocess
@@ -442,7 +445,443 @@ def generate_vectors(seed: int = 20260401) -> list[str]:
         b = mk_wire_bundle(rseed, cseed, enemy, ehp, eblk, pows, pots, evs, stride=stride)
         rows.append("TRACE_JSON\t" + json.dumps(b, separators=(",", ":")))
 
+    rows.extend(vector for vector, _ in FIXED_VECTORS)
     return rows
+
+
+Expected = str | dict[str, int | str]
+
+
+def lifecycle_vectors() -> list[tuple[str, Expected]]:
+    rows: list[tuple[str, Expected]] = []
+
+    def add(expected: str, *, mode=0, p_hp=80, p_block=0, p_powers="", orbs="",
+            e_hp=40, e_block=0, e_powers="", actions="") -> None:
+        fields = ("TURN_LIFECYCLE", mode, p_hp, p_block, p_powers, orbs,
+                  e_hp, e_block, e_powers, actions)
+        rows.append(("\t".join(map(str, fields)), expected))
+
+    def rounds(n: int) -> str:
+        return ";".join(["END_ROUND"] * n)
+
+    # 10 duration cases: PowerCmd applies a skip to newly inflicted player debuffs
+    # on the enemy turn, but stacking does not reapply the skip.
+    for initial, hp_by_round in (("", (75, 68)), ("VULNERABLE_POWER:1", (73, 66))):
+        for n, hp in enumerate(hp_by_round, 1):
+            add(f"{hp},0,3,VULNERABLE_POWER:1:0|40,0,1,-|-", mode=1,
+                p_powers=initial, actions=rounds(n))
+    for initial in ("", "WEAK_POWER:1,FRAIL_POWER:1"):
+        for n in (1, 2):
+            add("80,0,3,WEAK_POWER:1:0;FRAIL_POWER:1:0|40,0,1,-|-", mode=3,
+                p_powers=initial, actions=rounds(n))
+    add("80,0,3,-|40,0,1,VULNERABLE_POWER:1:0|-", actions="P_VULN:2;END_ROUND")
+    # PowerModel.GetTypeForAmount treats removing a debuff as a buff.
+    add("80,0,3,-|40,0,1,VULNERABLE_POWER:1:0;ARTIFACT_POWER:1:0|-",
+        e_powers="VULNERABLE_POWER:2,ARTIFACT_POWER:1", actions="P_VULN:-1")
+
+    # 8 Poison cases: PoisonPower.Trigger bypasses block and only decrements on survival.
+    # The headless damage path retains the power in the lethal state's snapshot.
+    poison = "POISON_POWER:3"
+    retained_block = poison + ",BARRICADE_POWER:1"
+    add("80,0,3,POISON_POWER:3:0|40,0,1,-|-", p_powers=poison)
+    add("80,0,3,-|40,0,1,POISON_POWER:3:0|-", e_powers=poison)
+    for n, p_hp, e_hp, amount in ((1, 77, 37, 2), (2, 75, 35, 1)):
+        powers = f"POISON_POWER:{amount}:0;BARRICADE_POWER:1:0"
+        add(f"{p_hp},5,3,{powers}|40,0,1,-|-",
+            p_block=5, p_powers=retained_block, actions=rounds(n))
+        add(f"80,0,3,-|{e_hp},5,1,{powers}|-",
+            e_block=5, e_powers=retained_block, actions=rounds(n))
+    add("0,0,3,POISON_POWER:3:0|40,0,0,-|-", p_hp=3, p_powers=poison, actions=rounds(1))
+    add("80,0,3,-|0,0,0,POISON_POWER:3:0|-", mode=1, e_hp=3, e_powers=poison, actions=rounds(1))
+
+    # 8 Doom cases: DoomPower.BeforeSideTurnEnd executes after the attack, at HP <=
+    # stacks. CreatureCmd.Kill removes ordinary powers without consuming block.
+    doom = "DOOM_POWER:10:0;BARRICADE_POWER:1:0"
+    for e_hp, final_enemy, vuln_skip in (
+        (9, "0,7,0,-", 1), (10, "0,7,0,-", 1),
+        (11, f"11,7,1,{doom}", 0), (12, f"12,7,1,{doom}", 0),
+    ):
+        setup = dict(e_hp=e_hp, e_block=7, e_powers="DOOM_POWER:10,BARRICADE_POWER:1")
+        add(f"80,0,3,-|{e_hp},7,1,{doom}|-", **setup)
+        add(f"75,0,3,VULNERABLE_POWER:1:{vuln_skip}|{final_enemy}|-",
+            **setup, mode=1, actions=rounds(1))
+
+    # 8 Thorns cases: BeforeDamageReceived retaliates against powered attacks only,
+    # and its Unpowered damage does not bypass block.
+    thorns = "THORNS_POWER:4"
+    for block, struck_hp in ((0, 76), (3, 79), (4, 80)):
+        add(f"{struck_hp},0,3,-|34,0,1,THORNS_POWER:4:0|-",
+            p_block=block, e_powers=thorns, actions="P_STRIKE")
+        add(f"80,{block},3,-|34,0,1,THORNS_POWER:4:0|-",
+            p_block=block, e_powers=thorns, actions="P_UNPOW")
+    # The headless damage core cancels a hit from a dealer killed by the reaction;
+    # that does not cancel the rest of the current effect program.
+    add("0,0,3,-|40,0,0,THORNS_POWER:4:0|-", p_hp=3, e_powers=thorns, actions="P_STRIKE")
+    add("80,0,3,THORNS_POWER:4:0;VULNERABLE_POWER:1:1|0,0,0,-|-",
+        mode=1, p_powers=thorns, e_hp=4, actions=rounds(1))
+
+    # 8 Plating cases: end-of-own-turn block is Unpowered; own-turn-start decay
+    # skips round 1. The headless fixture starts at the first player action.
+    for n, hp, powers in (
+        (0, 80, "PLATING_POWER:3:0;DEXTERITY_POWER:5:0;FRAIL_POWER:1:0"),
+        (1, 78, "PLATING_POWER:2:0;DEXTERITY_POWER:5:0;VULNERABLE_POWER:1:0"),
+        (2, 73, "PLATING_POWER:1:0;DEXTERITY_POWER:5:0;VULNERABLE_POWER:1:0"),
+        (3, 67, "DEXTERITY_POWER:5:0;VULNERABLE_POWER:1:0"),
+    ):
+        add(f"{hp},0,3,{powers}|40,0,1,-|-", mode=1,
+            p_powers="PLATING_POWER:3,DEXTERITY_POWER:5,FRAIL_POWER:1", actions=rounds(n))
+    for n, block, amount in ((0, 0, 3), (1, 3, 3), (2, 2, 2), (3, 1, 1)):
+        add(f"80,0,3,-|40,{block},1,PLATING_POWER:{amount}:0|-",
+            e_powers="PLATING_POWER:3", actions=rounds(n))
+
+    # 6 Ritual cases: RitualPower.AfterApplied only marks a new enemy application.
+    for n, hp, powers in (
+        (0, 80, "-"),
+        (1, 80, "RITUAL_POWER:2:0"),
+        (2, 76, "RITUAL_POWER:2:0;STRENGTH_POWER:2:0"),
+        (3, 70, "RITUAL_POWER:2:0;STRENGTH_POWER:4:0"),
+    ):
+        add(f"{hp},0,3,-|40,0,1,{powers}|-", mode=2, actions=rounds(n))
+    for n, hp, strength in ((1, 80, 3), (2, 73, 6)):
+        add(f"{hp},0,3,-|40,0,1,RITUAL_POWER:3:0;STRENGTH_POWER:{strength}:0|-",
+            mode=2, e_powers="RITUAL_POWER:1", actions=rounds(n))
+
+    # 12 orb cases: Dark accumulates into base evoke; Plasma ignores Focus and
+    # cannot trigger after a lethal player-end passive prevents a new round.
+    add("80,0,3,-|40,0,1,-|dark:6:6", orbs="dark")
+    add("80,0,3,-|40,0,1,-|dark:6:12", orbs="dark", actions=rounds(1))
+    add("80,0,3,FOCUS_POWER:2:0|40,0,1,-|dark:3:20",
+        orbs="dark:3:10", p_powers="FOCUS_POWER:2", actions=rounds(2))
+    add("80,0,3,FOCUS_POWER:-9:0|40,0,1,-|dark:6:6",
+        orbs="dark", p_powers="FOCUS_POWER:-9", actions=rounds(2))
+    add("80,0,3,-|40,0,1,-|plasma:1:2", orbs="plasma")
+    add("80,0,4,FOCUS_POWER:2:0|40,0,1,-|plasma:1:2",
+        orbs="plasma", p_powers="FOCUS_POWER:2", actions=rounds(2))
+    add("80,0,6,FOCUS_POWER:-9:0|40,0,1,-|plasma:3:9",
+        orbs="plasma:3:9", p_powers="FOCUS_POWER:-9", actions=rounds(1))
+    add("80,0,3,FOCUS_POWER:2:0|39,0,1,-|lightning:3:8",
+        orbs="lightning", p_powers="FOCUS_POWER:2", e_block=4, actions=rounds(1))
+    add("79,0,3,FOCUS_POWER:2:0;VULNERABLE_POWER:1:0|40,0,1,-|frost:2:5",
+        mode=1, orbs="frost", p_powers="FOCUS_POWER:2", actions=rounds(1))
+    add("80,0,3,-|33,0,1,-|glass:2:8", orbs="glass", actions=rounds(2))
+    add("80,0,3,FOCUS_POWER:-4:0|40,0,1,-|glass:4:8",
+        orbs="glass", p_powers="FOCUS_POWER:-4", actions=rounds(1))
+    add("80,2,3,-|0,0,0,-|plasma:1:2;dark:6:12;frost:2:5;lightning:3:8;glass:3:8",
+        mode=1, orbs="plasma,dark,frost,lightning,glass", e_hp=3, actions=rounds(1))
+    return rows
+
+
+def tier2_vectors() -> list[tuple[str, Expected]]:
+    rows: list[tuple[str, Expected]] = []
+
+    def add(kind: str, entry: str, expected: dict[str, int | str], *, found: bool = True,
+            param=0, asc=0, p_strength=0, e_hp=80, e_block=0, p_powers="", e_powers="") -> None:
+        fields = ("TIER2_EFFECTS", kind, entry, param, asc, p_strength, e_hp, e_block,
+                  p_powers, e_powers)
+        rows.append(("\t".join(map(str, fields)), {**expected, "found": f"found={int(found)}"}))
+
+    # 40 cards: canonical and upgraded OnPlay effects; the fixture does not pay
+    # costs or move the played card. Empty choices use the first eligible card.
+    strikes = ",".join(["STRIKE_IRONCLAD"] * 5)
+    dagger_hand = ",".join(["STRIKE_IRONCLAD"] * 4 + ["DEFEND_IRONCLAD"])
+    sword_hand = strikes + ",SOVEREIGN_BLADE"
+    debris_hand = strikes + ",DEBRIS"
+    dex_frail = "DEXTERITY_POWER:2,FRAIL_POWER:1"
+    card_cases = (
+        ("SUCKER_PUNCH", {}, (
+            dict(e_hp=72, e_powers="WEAK_POWER:1:0", energy=5),
+            dict(e_hp=70, e_powers="WEAK_POWER:2:0", energy=5),
+        )),
+        ("ASTRAL_PULSE", dict(e_block=9), (
+            dict(e_hp=77, e_block=0, stars=2), dict(e_hp=73, e_block=0, stars=2),
+        )),
+        ("ACROBATICS", {}, (
+            dict(hand_count=7, draw_count=7, discard_count=3),
+            dict(hand_count=8, draw_count=6, discard_count=3),
+        )),
+        ("ADRENALINE", {}, (
+            dict(energy=6, hand_count=7, draw_count=8),
+            dict(energy=7, hand_count=7, draw_count=8),
+        )),
+        ("AFTERLIFE", {}, (dict(allies=2), dict(allies=2))),
+        ("BALL_LIGHTNING", dict(p_strength=2, e_powers="THORNS_POWER:3"), (
+            dict(p_hp=67, e_hp=71, orbs=1), dict(p_hp=67, e_hp=68, orbs=1),
+        )),
+        ("ASSASSINATE", dict(p_strength=2, e_block=4, e_powers="VULNERABLE_POWER:1"), (
+            dict(e_hp=66, e_block=0, e_powers="VULNERABLE_POWER:2:0"),
+            dict(e_hp=62, e_block=0, e_powers="VULNERABLE_POWER:3:0"),
+        )),
+        # Bloodletting.cs: explicit Unblockable | Unpowered | Move overrides the
+        # dynamic variable for damage; DaggerThrow.cs: attack, then draw, then discard.
+        ("BLOODLETTING", dict(p_strength=2), (
+            dict(p_hp=67, energy=7), dict(p_hp=67, energy=8),
+        )),
+        ("BULWARK", {}, (
+            dict(p_block=12, hand=sword_hand), dict(p_block=15, hand=sword_hand),
+        )),
+        ("BURNING_PACT", {}, (
+            dict(hand_count=6, draw_count=8, exhaust_count=1),
+            dict(hand_count=7, draw_count=7, exhaust_count=1),
+        )),
+        ("COLLISION_COURSE", {}, (
+            dict(e_hp=70, hand=debris_hand), dict(e_hp=66, hand=debris_hand),
+        )),
+        ("CONSUMING_SHADOW", {}, (
+            dict(orbs=2, p_powers="CONSUMING_SHADOW_POWER:1:0"),
+            dict(orbs=3, p_powers="CONSUMING_SHADOW_POWER:1:0"),
+        )),
+        ("DASH", dict(p_powers=dex_frail), (
+            dict(p_block=9, e_hp=70), dict(p_block=11, e_hp=67),
+        )),
+        ("DEADLY_POISON", dict(e_powers="POISON_POWER:2"), (
+            dict(e_powers="POISON_POWER:7:0"), dict(e_powers="POISON_POWER:9:0"),
+        )),
+        ("DAGGER_THROW", {}, (
+            dict(e_hp=71, hand=dagger_hand, draw_count=9, discard_count=3),
+            dict(e_hp=68, hand=dagger_hand, draw_count=9, discard_count=3),
+        )),
+        ("FIGHT_ME", {}, (
+            dict(e_hp=70, p_powers="STRENGTH_POWER:3:0", e_powers="STRENGTH_POWER:1:0"),
+            dict(e_hp=68, p_powers="STRENGTH_POWER:4:0", e_powers="STRENGTH_POWER:1:0"),
+        )),
+        ("FRIENDSHIP", dict(p_strength=1), (
+            dict(p_powers="STRENGTH_POWER:-1:0;FRIENDSHIP_POWER:1:0"),
+            dict(p_powers="FRIENDSHIP_POWER:1:0"),
+        )),
+        ("NOT_YET", {}, (dict(p_hp=80), dict(p_hp=80))),
+        ("SHADOW_STEP", {}, (
+            dict(hand="-", hand_count=0, discard_count=7, p_powers="SHADOW_STEP_POWER:1:0"),
+            dict(hand="-", hand_count=0, discard_count=7, p_powers="SHADOW_STEP_POWER:1:0"),
+        )),
+        ("RICOCHET", {}, (dict(e_hp=68), dict(e_hp=65))),
+    )
+    for entry, setup, upgrades in card_cases:
+        for upgrade, expected in enumerate(upgrades):
+            add("CARD", entry, expected, **setup, param=upgrade)
+
+    # 16 potions: OnUse values, with powered-stat and existing-stack fixtures.
+    potion_cases = (
+        ("BLOCK_POTION", dict(p_powers=dex_frail), dict(p_block=12)),
+        ("FIRE_POTION", dict(p_strength=2, p_powers="WEAK_POWER:2", e_hp=10, e_block=7,
+                             e_powers="VULNERABLE_POWER:2,THORNS_POWER:3"),
+         dict(p_hp=70, e_hp=0, e_block=0, in_progress=0)),
+        ("SHIP_IN_A_BOTTLE", dict(p_powers=dex_frail),
+         dict(p_block=10, p_powers="DEXTERITY_POWER:2:0;FRAIL_POWER:1:0;BLOCK_NEXT_TURN_POWER:10:0")),
+        ("FYSH_OIL", dict(p_strength=-1), dict(p_powers="DEXTERITY_POWER:1:0")),
+        ("HEART_OF_IRON", dict(p_powers="PLATING_POWER:2"), dict(p_powers="PLATING_POWER:9:0")),
+        ("LIQUID_BRONZE", {}, dict(p_powers="THORNS_POWER:3:0")),
+        ("KINGS_COURAGE", {}, dict(hand=sword_hand)),
+        ("BONE_BREW", {}, dict(allies=2)),
+        ("POTION_OF_BINDING", dict(e_powers="ARTIFACT_POWER:1"), dict(e_powers="VULNERABLE_POWER:1:0")),
+        ("POISON_POTION", dict(e_powers="POISON_POWER:2"), dict(e_powers="POISON_POWER:8:0")),
+        ("STAR_POTION", dict(param=7), dict(stars=5)),
+        ("ENERGY_POTION", {}, dict(energy=7)),
+        ("SWIFT_POTION", {}, dict(hand_count=8, draw_count=7)),
+        # ShrinkPower's real stack type is dynamic; this row checks lookup and
+        # parity without presenting the extractor's static amount as vanilla.
+        ("BEETLE_JUICE", {}, dict(e_hp=80, in_progress=1)),
+        ("POTION_OF_DOOM", dict(e_hp=20), dict(e_hp=20, e_powers="DOOM_POWER:33:0", in_progress=1)),
+        ("MAZALETHS_GIFT", {}, dict(p_powers="RITUAL_POWER:1:0")),
+    )
+    for entry, setup, expected in potion_cases:
+        add("POTION", entry, expected, **setup)
+
+    # 20 monsters: fixed action parameters and last performed move, not initial HP
+    # scaling. DeadlyEnemies is A9, while ToughEnemies is A8.
+    for asc, hp in enumerate((60, 60, 60, 60, 60, 60, 60, 60, 60, 59, 59)):
+        add("MONSTER", "ASSASSIN_RUBY_RAIDER", dict(p_hp=hp, move="KILLSHOT_MOVE"), param=1, asc=asc)
+    for asc, hp, block in ((8, 63, 7), (9, 62, 8)):
+        add("MONSTER", "BOWLBUG_EGG", dict(p_hp=hp, e_block=block, move="BITE_MOVE"),
+            param=1, asc=asc, e_block=99)
+    for asc, hp, block, strength in ((7, 51, 7, 1), (8, 51, 8, 1), (9, 49, 8, 2)):
+        add("MONSTER", "SEAPUNK",
+            dict(p_hp=hp, e_block=block, e_powers=f"STRENGTH_POWER:{strength}:0", move="BUBBLE_BURP_MOVE"),
+            param=3, asc=asc)
+    add("MONSTER", "CALCIFIED_CULTIST",
+        dict(p_hp=61, e_powers="RITUAL_POWER:2:0;STRENGTH_POWER:2:0", move="DARK_STRIKE_MOVE"), param=2)
+    # Model-specific RNG fixture: seed 424242's first two-way roll is 1,
+    # picking LASH from the source branch order (THWACK, LASH).
+    add("MONSTER", "SLITHERING_STRANGLER", dict(move="LASH", e_block=0), param=2)
+    add("MONSTER", "SHRINKER_BEETLE", dict(p_hp=70, move="SHRINKER_MOVE"), param=1)
+    add("MONSTER", "BIG_DUMMY", dict(p_hp=70, energy=3, draw_count=5, move="NOTHING", in_progress=1))
+
+    # 4 absent Tier-2 rows: a missing monster still advances a round (but has no
+    # move, unlike BigDummy), and a missing potion can still be supplied by Tier-1.
+    add("CARD", "SHIV", dict(p_hp=70, energy=5, e_hp=80, hand=strikes, in_progress=1), found=False)
+    add("POTION", "POWER_POTION", dict(p_hp=70, energy=5, e_hp=80, hand=strikes, in_progress=1), found=False)
+    add("MONSTER", "VANTOM", dict(p_hp=70, energy=3, draw_count=5, move="", in_progress=1), found=False)
+    add("POTION", "HEAL_POTION", dict(p_hp=80, e_hp=1, in_progress=1), found=False, e_hp=0)
+    return rows
+
+
+def tier2_card_vectors() -> list[tuple[str, Expected]]:
+    rows: list[tuple[str, Expected]] = []
+    # Canonical constructor / OnUpgrade metadata from reference/sts2 card classes.
+    # The fixture passes it to both runtimes instead of reading expected values from the IR.
+    metadata = {
+        "CAPACITOR": ("power", "S", (1, 1), (0, 0)),
+        "BULK_UP": ("power", "S", (2, 2), (0, 0)),
+        "MODDED": ("skill", "S", (0, 0), (0, 0)),
+        "BODY_SLAM": ("attack", "E", (1, 0), (0, 0)),
+        "STACK": ("skill", "S", (1, 1), (0, 0)),
+        "MIMIC": ("skill", "A", (1, 1), (1, 0)),
+        "DEMONIC_SHIELD": ("skill", "A", (0, 0), (1, 0)),
+        "ENTRENCH": ("skill", "S", (2, 1), (0, 0)),
+        "DOUBLE_ENERGY": ("skill", "S", (1, 0), (1, 1)),
+        "BUBBLE_BUBBLE": ("skill", "E", (1, 1), (0, 0)),
+        "DISMANTLE": ("attack", "E", (1, 1), (0, 0)),
+        "IMPATIENCE": ("skill", "S", (0, 0), (0, 0)),
+        "FIGHT_ME": ("attack", "E", (2, 2), (0, 0)),
+    }
+
+    def add(entry: str, up: int, *, mode: str, energy: int = 5, p_block: int = 0,
+            a_block: int = 0, discard: int = 0, filler: str = "-", capacity: int = 3,
+            orbs: str = "-", p_powers: str = "-", a_powers: str = "-", e_powers: str = "-",
+            player_hp: int = 70, enemy_hp: int = 80, final_energy: int | None = None,
+            final_p_block: int | None = None, final_a_block: int | None = None,
+            final_capacity: int | None = None, final_orbs: str | None = None,
+            final_p_powers: str | None = None, final_a_powers: str | None = None,
+            final_e_powers: str | None = None, drawn: int = 0, cost_delta: int = 0,
+            ok: int = 1) -> None:
+        kind, target, costs, exhausts = metadata[entry]
+        cost, exhaust = costs[up], exhausts[up]
+        fields = ("TIER2_CARD", mode, entry, up, cost, kind, target, exhaust, energy, p_block, a_block,
+                  discard, filler, capacity, orbs, p_powers, a_powers, e_powers)
+
+        # CardModel result piles and CardPileCmd draw contract; exact instance IDs and order.
+        initial_hand = [f"999:{cost}"]
+        if entry == "MODDED":
+            initial_hand.append(f"998:{cost}")
+        if filler != "-":
+            initial_hand.append("1001:1")
+        initial_draw = [f"{cid}:1" for cid in range(1011, 1018)]
+        initial_discard = [f"{cid}:2" for cid in range(1021, 1021 + discard)]
+        hand, draw, disc = initial_hand.copy(), initial_draw.copy(), initial_discard.copy()
+        exh: list[str] = []
+        play: list[str] = []
+        if ok:
+            played = f"999:{cost + cost_delta}"
+            hand = hand[1:] + draw[:drawn]
+            draw = draw[drawn:]
+            if mode == "EFFECT":
+                play.append(played)
+            elif exhaust:
+                exh.append(played)
+            elif kind != "power":
+                disc.append(played)
+        after_energy = energy - (cost if ok and mode != "EFFECT" else 0)
+        if mode == "ROUND":
+            # End turn discards the remaining hand; the next turn draws five.
+            disc.extend(hand)
+            hand, draw = draw[:5], draw[5:]
+            after_energy = 3
+        elif mode == "NEXT":
+            # The first combat was won with a real Strike; a fresh fight
+            # clones the original deck in the scenario's fixed arrangement.
+            hand, draw, disc = initial_hand, initial_draw, initial_discard
+            after_energy = 3
+
+        def powers(given: str, expected: str | None) -> str:
+            if expected is not None:
+                return expected
+            return "-" if given == "-" else ";".join(f"{power}:0" for power in given.split(","))
+
+        player = (player_hp, p_block if final_p_block is None else final_p_block,
+                  after_energy if final_energy is None else final_energy,
+                  capacity if final_capacity is None else final_capacity)
+        ally = (70, a_block if final_a_block is None else final_a_block)
+        projection = (str(ok), ",".join(map(str, player)), ",".join(map(str, ally)), f"{enemy_hp},0",
+                      powers(p_powers, final_p_powers), powers(a_powers, final_a_powers),
+                      powers(e_powers, final_e_powers), orbs if final_orbs is None else final_orbs,
+                      *(",".join(pile) or "-" for pile in (hand, draw, disc, exh, play)))
+        rows.append(("\t".join(map(str, fields)), "|".join(projection)))
+
+    for mode in ("EFFECT", "PLAY"):
+        for up in (0, 1):
+            # OrbCmd caps at ten; RemoveCapacity removes occupied excess from
+            # the tail, not by evoking it. In particular frost gives no block.
+            add("CAPACITOR", up, mode=mode, final_capacity=(5, 6)[up])
+            add("CAPACITOR", up, mode=mode, capacity=9, final_capacity=10)
+            add("CAPACITOR", up, mode=mode, capacity=10, final_capacity=10)
+            bulk_powers = f"STRENGTH_POWER:{(2, 3)[up]}:0;DEXTERITY_POWER:{(2, 3)[up]}:0"
+            add("BULK_UP", up, mode=mode, capacity=2, orbs="lightning,frost",
+                final_capacity=1, final_orbs="lightning", final_p_powers=bulk_powers)
+            add("BULK_UP", up, mode=mode, capacity=2, orbs="lightning",
+                final_capacity=1, final_p_powers=bulk_powers)
+            add("BULK_UP", up, mode=mode, capacity=0, final_capacity=0, final_p_powers=bulk_powers)
+            add("MODDED", up, mode=mode, final_capacity=4, drawn=(1, 2)[up], cost_delta=1)
+            add("MODDED", up, mode=mode, capacity=10, final_capacity=10, drawn=(1, 2)[up], cost_delta=1)
+
+            # CalculatedVar reads the current source quantity; Power hooks
+            # then modify powered damage or block, not the observed operand.
+            add("BODY_SLAM", up, mode=mode, p_block=7, a_block=13,
+                p_powers="STRENGTH_POWER:2", enemy_hp=71)
+            add("BODY_SLAM", up, mode=mode, a_block=13, enemy_hp=80)
+            add("STACK", up, mode=mode, final_p_block=(0, 3)[up])
+            add("STACK", up, mode=mode, discard=2, final_p_block=(2, 5)[up])
+            add("MIMIC", up, mode=mode, p_block=3, a_block=7,
+                p_powers="DEXTERITY_POWER:2,FRAIL_POWER:1", a_powers="DEXTERITY_POWER:9", final_p_block=9)
+            add("MIMIC", up, mode=mode, p_block=3, final_p_block=3)
+            # DemonicShield's first command is a one-HP loss, bypassing block and
+            # Strength/Weak. Its second command uses the owner's block/dexterity,
+            # but Frail belongs to the target: 7 + truncate((5 + 2) * .75) = 12.
+            add("DEMONIC_SHIELD", up, mode=mode, p_block=5, a_block=7,
+                p_powers="STRENGTH_POWER:5,WEAK_POWER:1,DEXTERITY_POWER:2",
+                a_powers="DEXTERITY_POWER:9,FRAIL_POWER:1", player_hp=69, final_a_block=12)
+            add("DEMONIC_SHIELD", up, mode=mode, a_block=7, player_hp=69, final_a_block=7)
+            add("ENTRENCH", up, mode=mode, p_block=7, p_powers="DEXTERITY_POWER:8,FRAIL_POWER:1",
+                final_p_block=14)
+
+            add("DOUBLE_ENERGY", up, mode=mode, final_energy=(8, 10)[up] if mode == "PLAY" else 10)
+            add("BUBBLE_BUBBLE", up, mode=mode, p_powers="POISON_POWER:2")
+            add("BUBBLE_BUBBLE", up, mode=mode, e_powers="POISON_POWER:2",
+                final_e_powers=f"POISON_POWER:{(11, 14)[up]}:0")
+            # Artifact is only consumed if the conditional Apply is reached.
+            add("BUBBLE_BUBBLE", up, mode=mode, e_powers="ARTIFACT_POWER:1")
+            add("BUBBLE_BUBBLE", up, mode=mode, e_powers="POISON_POWER:2,ARTIFACT_POWER:1",
+                final_e_powers="POISON_POWER:2:0")
+            add("DISMANTLE", up, mode=mode, p_powers="VULNERABLE_POWER:1", enemy_hp=(72, 70)[up])
+            add("DISMANTLE", up, mode=mode, e_powers="VULNERABLE_POWER:1", enemy_hp=(56, 50)[up])
+            add("IMPATIENCE", up, mode=mode, drawn=(2, 3)[up])
+            add("IMPATIENCE", up, mode=mode, filler="skill", discard=2, drawn=(2, 3)[up])
+            add("IMPATIENCE", up, mode=mode, filler="attack", drawn=0)
+            add("FIGHT_ME", up, mode=mode, enemy_hp=(70, 68)[up],
+                final_p_powers=f"STRENGTH_POWER:{(3, 4)[up]}:0", final_e_powers="STRENGTH_POWER:1:0")
+
+    # Zero-energy and exact-payment boundaries, and explicit combat duration.
+    add("BODY_SLAM", 0, mode="PLAY", energy=0, p_block=7, ok=0)
+    add("BODY_SLAM", 1, mode="PLAY", energy=0, p_block=7, enemy_hp=73)
+    add("DOUBLE_ENERGY", 0, mode="PLAY", energy=1, final_energy=0)
+    add("DOUBLE_ENERGY", 1, mode="PLAY", energy=0, final_energy=0)
+    for up in (0, 1):
+        add("MODDED", up, mode="ROUND", p_block=4, final_p_block=0, final_capacity=4,
+            drawn=(1, 2)[up], cost_delta=1)
+    add("MODDED", 0, mode="NEXT", filler="attack", p_block=4, a_block=7,
+        orbs="frost", p_powers="DEXTERITY_POWER:2", a_powers="FRAIL_POWER:1",
+        drawn=1, cost_delta=1, final_p_block=0, final_a_block=0, final_capacity=3, final_orbs="-",
+        final_p_powers="-", final_a_powers="-")
+    return rows
+
+
+FIXED_VECTORS = lifecycle_vectors() + tier2_vectors() + tier2_card_vectors() + [
+    ("EXPEDITION", "99,5,111,1,1,1,1|53,75,0,3,3,3,5,3,1,1,1,3|1,1,1,5,1,1,1,7,1,1|1,1,1,101,1,1|0,99,0,1"),
+]
+
+
+def matches_expected(output: str, expected: Expected) -> bool:
+    if isinstance(expected, str):
+        return output == expected
+    try:
+        player, enemy, p_powers, e_powers, hand, found = output.split("|")
+        player_keys = ("p_hp", "p_block", "energy", "stars", "hand_count", "draw_count",
+                       "discard_count", "exhaust_count", "orbs", "allies")
+        enemy_keys = ("e_hp", "e_block", "move", "in_progress")
+        actual = dict(zip(player_keys, player.split(","), strict=True))
+        actual.update(zip(enemy_keys, enemy.split(","), strict=True))
+    except ValueError:
+        return False
+    actual.update(p_powers=p_powers, e_powers=e_powers, hand=hand, found=found)
+    return all(actual[key] == str(value) for key, value in expected.items())
 
 
 def main() -> int:
@@ -451,47 +890,52 @@ def main() -> int:
     if not CS_DLL.exists():
         raise SystemExit(f"C# oracle not found: {CS_DLL} (run `dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj` first)")
 
+    work_root = ROOT / ".agent_works"
+    work_root.mkdir(exist_ok=True)
     vectors = generate_vectors()
-    with tempfile.NamedTemporaryFile("w", suffix=".tsv", delete=False, encoding="utf-8") as f:
-        tsv_path = f.name
-        f.write("\n".join(vectors) + "\n")
-
-    try:
+    expected_by_vector = dict(FIXED_VECTORS)
+    with tempfile.TemporaryDirectory(dir=work_root, prefix="diff-") as tmpdir:
+        work_dir = pathlib.Path(tmpdir)
+        tsv_path = work_dir / "vectors.tsv"
+        tsv_path.write_text("\n".join(vectors) + "\n", encoding="utf-8")
         lean_proc = subprocess.run([str(LEAN_BIN), "--diff", tsv_path], capture_output=True, text=True, check=True)
         cs_proc = subprocess.run(["dotnet", str(CS_DLL), "--diff", tsv_path], capture_output=True, text=True, check=True)
-    finally:
-        os.unlink(tsv_path)
 
-    lean_lines = [ln.strip() for ln in lean_proc.stdout.splitlines() if ln.strip() != "" or len(vectors) == 0]
-    # Note: MOD_SORT on "" emits an empty line, so splitlines(keepends=False) preserves line count 1:1
-    lean_raw = lean_proc.stdout.splitlines()
-    cs_raw = cs_proc.stdout.splitlines()
+        # MOD_SORT on "" emits an empty line; preserve the 1:1 correspondence.
+        lean_raw = lean_proc.stdout.splitlines()
+        cs_raw = cs_proc.stdout.splitlines()
+        if len(lean_raw) != len(vectors) or len(cs_raw) != len(vectors):
+            print(f"LINE COUNT MISMATCH: vectors={len(vectors)}, lean={len(lean_raw)}, csharp={len(cs_raw)}")
+            return 1
 
-    if len(lean_raw) != len(vectors) or len(cs_raw) != len(vectors):
-        print(f"LINE COUNT MISMATCH: vectors={len(vectors)}, lean={len(lean_raw)}, csharp={len(cs_raw)}")
-        return 1
+        family_counts: Counter[str] = Counter()
+        mismatches = 0
+        for idx, (vec, l_out, c_out) in enumerate(zip(vectors, lean_raw, cs_raw)):
+            fam = vec.split("\t", 1)[0]
+            family_counts[fam] += 1
+            expected = expected_by_vector.get(vec)
+            unexpected = [] if expected is None else [
+                side for side, out in (("Lean", l_out), (".NET", c_out)) if not matches_expected(out, expected)
+            ]
+            if l_out != c_out or unexpected:
+                mismatches += 1
+                if mismatches <= 15 or unexpected:
+                    print(f"[MISMATCH #{idx} {fam}] input={vec!r}\n  Lean: {l_out!r}\n  .NET: {c_out!r}")
+                    if expected is not None:
+                        print(f"  Expected: {expected!r}")
+                    if unexpected:
+                        print(f"  Failed expectation: {', '.join(unexpected)}")
 
-    family_counts: Counter[str] = Counter()
-    mismatches = 0
-    for idx, (vec, l_out, c_out) in enumerate(zip(vectors, lean_raw, cs_raw)):
-        fam = vec.split("\t", 1)[0]
-        family_counts[fam] += 1
-        if l_out != c_out:
-            mismatches += 1
-            if mismatches <= 15:
-                print(f"[MISMATCH #{idx} {fam}] input={vec!r}\n  Lean: {l_out!r}\n  .NET: {c_out!r}")
+        print("Differential test summary (.NET 9 Sts2Oracle vs Lean 4 sts2sim):")
+        for fam, cnt in sorted(family_counts.items()):
+            print(f"  {fam:14s}: {cnt} vectors")
+        print(f"Total vectors: {len(vectors)}, mismatches: {mismatches}")
+        if mismatches != 0:
+            return 1
 
-    print("Differential test summary (.NET 9 Sts2Oracle vs Lean 4 sts2sim):")
-    for fam, cnt in sorted(family_counts.items()):
-        print(f"  {fam:14s}: {cnt} vectors")
-    print(f"Total vectors: {len(vectors)}, mismatches: {mismatches}")
-    if mismatches != 0:
-        return 1
-
-    # Bi-directional C# <-> Lean JSON trace file handoff verification
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cs_trace = os.path.join(tmpdir, "cs_export.json")
-        lean_trace = os.path.join(tmpdir, "lean_export.json")
+        # Bi-directional C# <-> Lean JSON trace file handoff verification
+        cs_trace = work_dir / "cs_export.json"
+        lean_trace = work_dir / "lean_export.json"
         subprocess.run(["dotnet", str(CS_DLL), "--export-sample-trace", cs_trace], capture_output=True, text=True, check=True)
         lean_inspect = subprocess.run([str(LEAN_BIN), "--inspect", cs_trace, "--verify", "--viewer", "2"], capture_output=True, text=True, check=True)
         if "ChecksumsVerified=true" not in lean_inspect.stdout:

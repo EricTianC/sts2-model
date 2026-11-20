@@ -31,6 +31,11 @@ import Sts2Model.Combat.TurnLoop
 import Sts2Model.Multiplayer.ActionQueueSet
 import Sts2Model.Replay.History
 import Sts2Model.Sim.EffectIR
+import Sts2Model.Sim.Generated.Types
+import Sts2Model.Sim.Generated.Cards
+import Sts2Model.Sim.Generated.Potions
+import Sts2Model.Sim.Generated.Monsters
+import Sts2Model.Sim.Generated.Verify
 import Sts2Model.Sim.VanillaEffects
 import Sts2Model.Replay.Timeline
 import Sts2Model.Replay.TraceCodec
@@ -44,6 +49,7 @@ import Sts2Model.Mechanics.Dread
 import Sts2Model.Run.Map
 import Sts2Model.Run.Odds
 import Sts2Model.Run.RunLoop
+import Sts2Model.Run.Expedition
 
 import Sts2Model.Proofs.DamagePipeline
 import Sts2Model.Proofs.HookSafety
@@ -66,6 +72,7 @@ import Sts2Model.Examples.VanillaShowcase
 import Sts2Model.Examples.ModTemplates
 import Sts2Model.Examples.TimelineShowcase
 import Sts2Model.Examples.ReplayAnalyzerExample
+import Sts2Model.Examples.ExpeditionShowcase
 
 namespace Sts2Model
 

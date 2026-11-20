@@ -164,6 +164,18 @@ def resolveListenerCtx (cs : CombatState) (ref : ListenerRef) : ListenerCtx :=
       { ref := ref, ownerId := player.map (·.creatureId), playerId := some pid }
   | _ => { ref := ref }
 
+/-- Pure effect values emitted by `HookBehavior` turn-lifecycle & reactive damage callbacks. -/
+inductive HookEffect where
+  | tickDownDuration (ownerId : CreatureId) (instId : PowerInstanceId)
+  | clearSkipDurationTick (ownerId : CreatureId) (instId : PowerInstanceId)
+  | decrementPower (ownerId : CreatureId) (instId : PowerInstanceId)
+  | modifyPowerAmount (ownerId : CreatureId) (instId : PowerInstanceId) (delta : Int)
+  | applyPowerById (targetId : CreatureId) (powerId : ModelId) (amount : Int) (powerType : PowerType := .buff) (allowNegative : Bool := false)
+  | dealDamage (dealerId : Option CreatureId) (targetId : CreatureId) (amount : Dec) (props : ValueProp)
+  | gainBlock (targetId : CreatureId) (amount : Dec) (props : ValueProp)
+  | doomKillSide (side : CombatSide)
+  deriving Repr, DecidableEq
+
 /-- Abstract model hook implementation matching virtual methods on `AbstractModel`. -/
 structure HookBehavior where
   modifyDamageAdditive :
@@ -232,6 +244,14 @@ structure HookBehavior where
   shouldPlayerResetEnergy : ListenerCtx → Player → Bool := fun _ _ => true
   shouldCreatureBeRemovedFromCombatAfterDeath : ListenerCtx → Creature → Bool := fun _ _ => true
   shouldPowerBeRemovedOnDeath : ListenerCtx → PowerInstance → Bool := fun _ _ => true
+  afterSideTurnStart : ListenerCtx → CombatState → CombatSide → List CreatureId → List HookEffect :=
+    fun _ _ _ _ => []
+  beforeSideTurnEnd : ListenerCtx → CombatState → CombatSide → List CreatureId → List HookEffect :=
+    fun _ _ _ _ => []
+  afterSideTurnEnd : ListenerCtx → CombatState → CombatSide → List CreatureId → List HookEffect :=
+    fun _ _ _ _ => []
+  beforeDamageReceived : ListenerCtx → CombatState → Creature → Dec → ValueProp → Option Creature → List HookEffect :=
+    fun _ _ _ _ _ _ => []
 
 def HookBehavior.neutral : HookBehavior := {}
 
@@ -249,13 +269,14 @@ def strengthBehavior : HookBehavior :=
           if d.id == oid && props.isPoweredAttack then Dec.ofInt ctx.amount else Dec.zero
       | _, _ => Dec.zero }
 
-def dexterityBehavior : HookBehavior :=
+def dexterityBehavior (cs : CombatState) : HookBehavior :=
   { HookBehavior.neutral with
-    modifyBlockAdditive := fun ctx target _ props _ =>
-      match ctx.ownerId with
-      | some oid =>
-          if target.id == oid && props.isPoweredCardOrMonsterMoveBlock then Dec.ofInt ctx.amount else Dec.zero
-      | none => Dec.zero }
+    modifyBlockAdditive := fun ctx target _ props card =>
+      let recipient := match card with
+        | none => some target.id
+        | some c => (cs.findPlayer c.ownerId).map (·.creatureId)
+      if recipient.isSome && recipient == ctx.ownerId && props.isPoweredCardOrMonsterMoveBlock then
+        Dec.ofInt ctx.amount else Dec.zero }
 
 def vulnerableBehavior (cs : CombatState) : HookBehavior :=
   { HookBehavior.neutral with
@@ -269,7 +290,13 @@ def vulnerableBehavior (cs : CombatState) : HookBehavior :=
               | none   => false
             if hasPaperPhrog then Dec.ofScaled 175 2 else baseMul
           else Dec.one
-      | _, _ => Dec.one }
+      | _, _ => Dec.one
+    afterSideTurnEnd := fun ctx _ side _ =>
+      if side == .enemy then
+        match ctx.ref with
+        | .power oid instId _ => [.tickDownDuration oid instId]
+        | _ => []
+      else [] }
 
 def weakBehavior : HookBehavior :=
   { HookBehavior.neutral with
@@ -277,7 +304,13 @@ def weakBehavior : HookBehavior :=
       match dealer, ctx.ownerId with
       | some d, some oid =>
           if d.id == oid && props.isPoweredAttack then Dec.ofScaled 75 2 else Dec.one
-      | _, _ => Dec.one }
+      | _, _ => Dec.one
+    afterSideTurnEnd := fun ctx _ side _ =>
+      if side == .enemy then
+        match ctx.ref with
+        | .power oid instId _ => [.tickDownDuration oid instId]
+        | _ => []
+      else [] }
 
 def frailBehavior : HookBehavior :=
   { HookBehavior.neutral with
@@ -285,7 +318,13 @@ def frailBehavior : HookBehavior :=
       match ctx.ownerId with
       | some oid =>
           if target.id == oid && props.isPoweredCardOrMonsterMoveBlock then Dec.ofScaled 75 2 else Dec.one
-      | none => Dec.one }
+      | none => Dec.one
+    afterSideTurnEnd := fun ctx _ side _ =>
+      if side == .enemy then
+        match ctx.ref with
+        | .power oid instId _ => [.tickDownDuration oid instId]
+        | _ => []
+      else [] }
 
 def intangibleBehavior : HookBehavior :=
   { HookBehavior.neutral with
@@ -296,7 +335,13 @@ def intangibleBehavior : HookBehavior :=
     modifyHpLostAfterOsty := fun ctx target amt _ _ _ =>
       match ctx.ownerId with
       | some oid => if target.id == oid && Dec.one ≤ amt then Dec.one else amt
-      | none => amt }
+      | none => amt
+    afterSideTurnEnd := fun ctx _ side _ =>
+      if side == .enemy then
+        match ctx.ref with
+        | .power oid instId _ => [.decrementPower oid instId]
+        | _ => []
+      else [] }
 
 def artifactBehavior : HookBehavior :=
   { HookBehavior.neutral with
@@ -326,15 +371,91 @@ def vajraBehavior : HookBehavior :=
           if d.id == oid && props.isPoweredAttack then Dec.one else Dec.zero
       | _, _ => Dec.zero }
 
+def poisonBehavior : HookBehavior :=
+  { HookBehavior.neutral with
+    afterSideTurnStart := fun ctx _ _ participants =>
+      match ctx.ref with
+      | .power oid instId _ =>
+          if participants.contains oid && ctx.amount > 0 then
+            [ .dealDamage none oid (Dec.ofInt ctx.amount) DamageProps.nonCardHpLoss
+            , .decrementPower oid instId ]
+          else []
+      | _ => [] }
+
+def doomBehavior : HookBehavior :=
+  { HookBehavior.neutral with
+    beforeSideTurnEnd := fun _ _ side _ =>
+      if side == .enemy then [.doomKillSide .enemy] else [] }
+
+def thornsBehavior : HookBehavior :=
+  { HookBehavior.neutral with
+    beforeDamageReceived := fun ctx _ target _ props dealer =>
+      match ctx.ownerId, dealer with
+      | some oid, some d =>
+          if target.id == oid && props.isPoweredAttack && ctx.amount > 0 then
+            [.dealDamage (some oid) d.id (Dec.ofInt ctx.amount) DamageProps.nonCardUnpowered]
+          else []
+      | _, _ => [] }
+
+def platingBehavior : HookBehavior :=
+  { HookBehavior.neutral with
+    beforeSideTurnEnd := fun ctx _ _ participants =>
+      match ctx.ownerId with
+      | some oid =>
+          if participants.contains oid && ctx.amount > 0 then
+            [.gainBlock oid (Dec.ofInt ctx.amount) BlockProps.nonCardUnpowered]
+          else []
+      | none => []
+    afterSideTurnStart := fun ctx cs _ participants =>
+      match ctx.ref with
+      | .power oid instId _ =>
+          if !participants.contains oid then []
+          else
+            match cs.findCreature oid with
+            | none => []
+            | some owner =>
+                let skipPlayerTurn1 :=
+                  match (owner.playerId.bind cs.findPlayer).bind (·.combatState) with
+                  | some pcs => pcs.turnNumber == 1
+                  | none     => false
+                let skipEnemyRound1 := owner.side == .enemy && cs.roundNumber == 1
+                if skipPlayerTurn1 || skipEnemyRound1 then []
+                else
+                  let decr : Int :=
+                    if owner.side == .enemy then -(max 1 cs.players.length : Int) else -1
+                  [.modifyPowerAmount oid instId decr]
+      | _ => [] }
+
+def ritualBehavior : HookBehavior :=
+  { HookBehavior.neutral with
+    afterSideTurnEnd := fun ctx cs _ participants =>
+      match ctx.ref with
+      | .power oid instId _ =>
+          if !participants.contains oid then []
+          else
+            let skipped :=
+              (cs.findCreature oid |>.bind (·.powers.find? (·.instanceId == instId))).map
+                (·.skipNextDurationTick) |>.getD false
+            if skipped then [.clearSkipDurationTick oid instId]
+            else if ctx.amount > 0 then
+              [.applyPowerById oid (ModelId.mkPower "STRENGTH_POWER") ctx.amount .buff true]
+            else []
+      | _ => [] }
+
 def builtinBehaviorRegistry (cs : CombatState) : BehaviorRegistry := fun mid =>
   if mid == ModelId.mkPower "STRENGTH_POWER" then strengthBehavior
-  else if mid == ModelId.mkPower "DEXTERITY_POWER" then dexterityBehavior
+  else if mid == ModelId.mkPower "DEXTERITY_POWER" then dexterityBehavior cs
   else if mid == ModelId.mkPower "VULNERABLE_POWER" then vulnerableBehavior cs
   else if mid == ModelId.mkPower "WEAK_POWER" then weakBehavior
   else if mid == ModelId.mkPower "FRAIL_POWER" then frailBehavior
   else if mid == ModelId.mkPower "INTANGIBLE_POWER" then intangibleBehavior
   else if mid == ModelId.mkPower "ARTIFACT_POWER" then artifactBehavior
   else if mid == ModelId.mkPower "BARRICADE_POWER" then barricadeBehavior
+  else if mid == ModelId.mkPower "POISON_POWER" then poisonBehavior
+  else if mid == ModelId.mkPower "DOOM_POWER" then doomBehavior
+  else if mid == ModelId.mkPower "THORNS_POWER" then thornsBehavior
+  else if mid == ModelId.mkPower "PLATING_POWER" then platingBehavior
+  else if mid == ModelId.mkPower "RITUAL_POWER" then ritualBehavior
   else if mid == ModelId.mkRelic "VAJRA" then vajraBehavior
   else HookBehavior.neutral
 

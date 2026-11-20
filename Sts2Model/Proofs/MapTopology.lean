@@ -7,7 +7,7 @@
   - RelicGrabBag pullFromFront / pullFromBack strictly decreases total remaining count
   All theorems proved in Lean 4 kernel with zero `sorry`.
 -/
-import Sts2Model.Run.RunLoop
+import Sts2Model.Run.Expedition
 
 namespace Sts2Model.Proofs
 
@@ -258,5 +258,15 @@ theorem relicGrabBag_pullFromFront_decreases_count (b : RelicGrabBag) (r : Relic
           rw [hFb] at hPull
           simp [RelicGrabBag.totalCount, hFb]
           omega
+
+/-- When a caller retains its previous state on a rejected movement, no navigation,
+    resources, or RNG state can be consumed. -/
+theorem expedition_missing_point_leaves_state (env : Sts2Model.Sim.EffectEnv)
+    (s : Expedition) (dest : MapCoord) (room : RoomType)
+    (hMap : s.phase = .map) (hMissing : s.nav.actMap.getPoint dest = none) :
+    (match s.step env (.enterPoint dest room) with
+      | .ok next => next
+      | .error _ => s) = s := by
+  rw [Expedition.missing_point_rejected env s dest room hMap hMissing]
 
 end Sts2Model.Proofs

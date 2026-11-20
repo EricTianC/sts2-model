@@ -94,6 +94,8 @@ structure TimelineState where
   combatHistory    : List TimedCombatHistoryEntry := []
   runHistory       : List RunHistoryEntryEx := []
   attributions     : List DamageAttribution := []
+  pendingCards     : List PendingCardChoice := []
+  cardChoiceError  : Option String := none
   deriving Repr, DecidableEq, Inhabited
 
 -- ============================================================================
@@ -234,6 +236,26 @@ def payloadMeta : ReplayActionPayload → GameActionType × Bool × Bool
   | .pickRelic _             => (.nonCombat, true, false)
   | .voteNextAct             => (.nonCombat, true, false)
 
+private def applyCardResult (st : TimelineState) (stepIdx : Nat) (act : QueuedAction)
+    (r : HeadlessCardResult) : TimelineState :=
+  let others := st.pendingCards.filter (·.play.playerId != act.ownerId)
+  let (queue, pending) := match r.pending with
+    | none => (st.queueSet, others)
+    | some choice =>
+        ((st.queueSet.pauseActionForPlayerChoice act.actionId { cancelPlayCardActions := true }).1, choice :: others)
+  { st with
+    combat := some r.combat
+    pendingCards := pending
+    queueSet := queue
+    choiceStream := r.stream
+    choiceSync := r.sync
+    combatHistory := st.combatHistory ++ r.history.map (fun e => { stepIdx := stepIdx, entry := e })
+    attributions := st.attributions ++ r.attributions }
+
+private def pendingForAction (st : TimelineState) (id : Nat) : Option PendingCardChoice := do
+  let q ← st.queueSet.queues.find? fun q => q.actions.head?.any (·.actionId == id)
+  st.pendingCards.find? (·.play.playerId == q.ownerId)
+
 def execQueuedActionHeadless (env : EffectEnv) (st : TimelineState) (stepIdx : Nat)
     (act : QueuedAction) : TimelineState :=
   match st.combat with
@@ -241,15 +263,18 @@ def execQueuedActionHeadless (env : EffectEnv) (st : TimelineState) (stepIdx : N
   | some cs =>
       match act.payload with
       | .playCard cid tid =>
-          let (cs', _, hist, attrs, stream') :=
-            execPlayCardHeadless env cs act.ownerId cid tid stepIdx st.choiceStream
-          { st with
-            combat := some cs'
-            choiceStream := stream'
-            combatHistory := st.combatHistory ++ hist.map (fun e => { stepIdx := stepIdx, entry := e })
-            attributions := st.attributions ++ attrs }
+          match st.pendingCards.find? (·.play.playerId == act.ownerId) with
+          | none => applyCardResult st stepIdx act
+              (execPlayCardHeadless env cs act.ownerId cid tid stepIdx st.choiceStream st.choiceSync true)
+          | some choice =>
+              match resumeCardPlay env cs choice stepIdx st.choiceStream st.choiceSync true with
+              | .ok next => applyCardResult st stepIdx act next
+              | .error e =>
+                  { st with
+                    cardChoiceError := some e
+                    queueSet := (st.queueSet.pauseActionForPlayerChoice act.actionId).1 }
       | .usePotion slotIdx tid =>
-          let (cs', _, hist, attrs, stream') :=
+          let (cs', _, hist, attrs, stream', _) :=
             execUsePotionHeadless env cs act.ownerId slotIdx tid stepIdx st.choiceStream
           { st with
             combat := some cs'
@@ -285,7 +310,9 @@ def drainReadyQueueFuel (fuel : Nat) (env : EffectEnv) (stepIdx : Nat)
       | some act =>
           let qsExec := qs1.beginExecuting act.actionId
           let stExec := execQueuedActionHeadless env { st with queueSet := qsExec } stepIdx act
-          let qsPopped := stExec.queueSet.popAction act.actionId
+          let qsPopped :=
+            if stExec.pendingCards.any (·.play.playerId == act.ownerId) then stExec.queueSet
+            else stExec.queueSet.popAction act.actionId
           drainReadyQueueFuel k env stepIdx { stExec with queueSet := qsPopped }
 
 def applyOutOfCombatSync (st : TimelineState) (ev : TimelineEvent)
@@ -386,8 +413,16 @@ def replayStep (env : EffectEnv) (st : TimelineState) (ev : TimelineEvent) : Tim
             match ce.actionId with
             | none => st
             | some oldId =>
-                let (qs1, _) := st.queueSet.resumeAction oldId
-                drainReadyQueueFuel (totalQueuedCount qs1 + 4) env ev.seqIdx { st with queueSet := qs1 }
+                match st.combat, pendingForAction st oldId with
+                | some cs, some pending =>
+                    match pending.selection cs st.choiceStream with
+                    | .error e => { st with cardChoiceError := some e }
+                    | .ok _ =>
+                        let (qs1, _) := st.queueSet.resumeAction oldId
+                        drainReadyQueueFuel (totalQueuedCount qs1 + 4) env ev.seqIdx { st with queueSet := qs1 }
+                | _, _ =>
+                    let (qs1, _) := st.queueSet.resumeAction oldId
+                    drainReadyQueueFuel (totalQueuedCount qs1 + 4) env ev.seqIdx { st with queueSet := qs1 }
         | .playerChoice =>
             let pid := ce.playerId.getD ev.actorPlayerId
             let cid := ce.choiceId.getD 0
@@ -403,7 +438,7 @@ def replayStep (env : EffectEnv) (st : TimelineState) (ev : TimelineEvent) : Tim
         match st.combat with
         | none => st
         | some cs =>
-            let (cs', mHist, mAttrs, stream') :=
+            let (cs', mHist, mAttrs, stream', _) :=
               execEnemyTurnHeadless env cs ev.seqIdx st.choiceStream
             { st with
               combat := some cs'

@@ -197,12 +197,11 @@ def searchLethalFuel (fuel : Nat) (env : EffectEnv) (cs : CombatState)
         let rec tryIdx (idx : Nat) : List CandidatePlay → Option (List CandidatePlay × CombatState)
           | [] => none
           | cand :: rest =>
-              let (cs', ok, _, _, _) :=
-                execPlayCardHeadless env cs cand.playerId cand.cardId cand.targetId acc.length []
+              let r := execPlayCardHeadless env cs cand.playerId cand.cardId cand.targetId acc.length
               let resOpt :=
-                if ok then
+                if r.accepted && r.pending.isNone then
                   let rem := removeNth idx candidates
-                  searchLethalFuel k env cs' rem (acc ++ [cand])
+                  searchLethalFuel k env r.combat rem (acc ++ [cand])
                 else none
               match resOpt with
               | some sol => some sol

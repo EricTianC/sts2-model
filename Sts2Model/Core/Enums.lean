@@ -351,4 +351,49 @@ inductive CardRarityOddsType where
   | blitzNeow
   deriving Repr, DecidableEq, Inhabited
 
+/-- Run ascension level enum matching `Core.Entities.Ascension/AscensionLevel.cs`. -/
+inductive AscensionLevel where
+  | none
+  | swarmingElites
+  | wearyTraveler
+  | poverty
+  | tightBelt
+  | ascendersBane
+  | inflation
+  | scarcity
+  | toughEnemies
+  | deadlyEnemies
+  | doubleBoss
+  deriving Repr, DecidableEq, Inhabited
+
+def AscensionLevel.toNat : AscensionLevel → Nat
+  | .none           => 0
+  | .swarmingElites => 1
+  | .wearyTraveler  => 2
+  | .poverty        => 3
+  | .tightBelt      => 4
+  | .ascendersBane  => 5
+  | .inflation      => 6
+  | .scarcity       => 7
+  | .toughEnemies   => 8
+  | .deadlyEnemies  => 9
+  | .doubleBoss     => 10
+
+/-- Ascension-scaled integer value (`AscensionHelper.GetValueIfAscension`). -/
+structure AscensionVal where
+  threshold : Nat := 0
+  ascVal    : Int
+  baseVal   : Int
+  deriving Repr, DecidableEq, Inhabited
+
+namespace AscensionVal
+
+def const (x : Int) : AscensionVal :=
+  ⟨0, x, x⟩
+
+def eval (v : AscensionVal) (asc : Nat) : Int :=
+  if asc ≥ v.threshold then v.ascVal else v.baseVal
+
+end AscensionVal
+
 end Sts2Model.Core

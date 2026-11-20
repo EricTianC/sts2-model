@@ -23,15 +23,15 @@ inductive RewardKind where
   | potion (modelId : ModelId)
   deriving Repr, DecidableEq, Inhabited
 
-structure LinkedRewardSet where
-  rewards : List RewardKind := []
+structure LinkedRewardSet (α : Type := RewardKind) where
+  rewards : List α := []
   claimed : Bool := false
   deriving Repr, DecidableEq, Inhabited
 
 namespace LinkedRewardSet
 
 /-- Claiming one reward in a linked set claims that item and closes all linked alternatives. -/
-def selectIndex (lrs : LinkedRewardSet) (idx : Nat) : LinkedRewardSet × Option RewardKind :=
+def selectIndex (lrs : LinkedRewardSet α) (idx : Nat) : LinkedRewardSet α × Option α :=
   if lrs.claimed then (lrs, none)
   else match lrs.rewards[idx]? with
     | none   => (lrs, none)

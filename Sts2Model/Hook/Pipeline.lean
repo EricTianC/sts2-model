@@ -297,4 +297,32 @@ def shouldPlayerResetEnergy (cs : CombatState) (reg : BehaviorRegistry) (player 
   let listeners := (snapshotCombatListeners cs modSubscribers).map (resolveListenerCtx cs)
   (evalShouldAll listeners fun ctx => (reg ctx.ref.modelId).shouldPlayerResetEnergy ctx player).1
 
+-- ============================================================================
+-- Turn Lifecycle & Reactive Hook Effect Collectors
+-- ============================================================================
+
+def collectAfterSideTurnStartEffects (cs : CombatState) (reg : BehaviorRegistry) (side : CombatSide)
+    (participants : List CreatureId) (modSubscribers : List (ModId × ModelId) := []) :
+    List HookEffect :=
+  let listeners := (snapshotCombatListeners cs modSubscribers).map (resolveListenerCtx cs)
+  listeners.foldl (fun acc ctx => acc ++ (reg ctx.ref.modelId).afterSideTurnStart ctx cs side participants) []
+
+def collectBeforeSideTurnEndEffects (cs : CombatState) (reg : BehaviorRegistry) (side : CombatSide)
+    (participants : List CreatureId) (modSubscribers : List (ModId × ModelId) := []) :
+    List HookEffect :=
+  let listeners := (snapshotCombatListeners cs modSubscribers).map (resolveListenerCtx cs)
+  listeners.foldl (fun acc ctx => acc ++ (reg ctx.ref.modelId).beforeSideTurnEnd ctx cs side participants) []
+
+def collectAfterSideTurnEndEffects (cs : CombatState) (reg : BehaviorRegistry) (side : CombatSide)
+    (participants : List CreatureId) (modSubscribers : List (ModId × ModelId) := []) :
+    List HookEffect :=
+  let listeners := (snapshotCombatListeners cs modSubscribers).map (resolveListenerCtx cs)
+  listeners.foldl (fun acc ctx => acc ++ (reg ctx.ref.modelId).afterSideTurnEnd ctx cs side participants) []
+
+def collectBeforeDamageReceivedEffects (cs : CombatState) (reg : BehaviorRegistry)
+    (target : Creature) (amount : Dec) (props : ValueProp) (dealer : Option Creature)
+    (modSubscribers : List (ModId × ModelId) := []) : List HookEffect :=
+  let listeners := (snapshotCombatListeners cs modSubscribers).map (resolveListenerCtx cs)
+  listeners.foldl (fun acc ctx => acc ++ (reg ctx.ref.modelId).beforeDamageReceived ctx cs target amount props dealer) []
+
 end Sts2Model.Hook

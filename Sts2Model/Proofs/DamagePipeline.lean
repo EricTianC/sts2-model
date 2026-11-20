@@ -147,15 +147,15 @@ theorem unpowered_ignores_powered_damage_modifiers (cs : CombatState) (ctx : Lis
   · simp only [weakBehavior, hp]; split <;> simp
 
 /-- Unpowered block (`props.unpowered = true`) is immune to Dexterity and Frail. -/
-theorem unpowered_ignores_powered_block_modifiers (ctx : ListenerCtx)
+theorem unpowered_ignores_powered_block_modifiers (cs : CombatState) (ctx : ListenerCtx)
     (target : Creature) (blk : Dec) (props : ValueProp) (card : Option CardInstance)
     (hUnpowered : props.unpowered = true) :
-    dexterityBehavior.modifyBlockAdditive ctx target blk props card = Dec.zero ∧
+    (dexterityBehavior cs).modifyBlockAdditive ctx target blk props card = Dec.zero ∧
     frailBehavior.modifyBlockMultiplicative ctx target blk props card = Dec.one := by
   have hp : props.isPoweredCardOrMonsterMoveBlock = false := by
     simp [ValueProp.isPoweredCardOrMonsterMoveBlock, hUnpowered]
   constructor
-  · simp only [dexterityBehavior, hp]; split <;> simp
+  · simp [dexterityBehavior, hp]
   · simp only [frailBehavior, hp]; split <;> simp
 
 /-- Unblockable damage (`props.unblockable = true`) completely bypasses creature Block. -/

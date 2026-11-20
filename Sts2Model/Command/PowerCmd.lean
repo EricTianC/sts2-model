@@ -127,7 +127,8 @@ def applyPower (cs : CombatState) (reg : BehaviorRegistry)
                 , applierId := applierId
                 , amount := clamped
                 , skipNextDurationTick :=
-                    (target.side == .player && cs1.currentSide == .enemy && template.powerType == .debuff) }
+                    (target.side == .player && cs1.currentSide == .enemy && template.powerType == .debuff) ||
+                    (target.side == .enemy && cs1.currentSide == .enemy && template.modelId == ModelId.mkPower "RITUAL_POWER") }
               if newPow.shouldRemoveDueToAmount then
                 (cs1, none)
               else
@@ -140,16 +141,25 @@ def removePower (cs : CombatState) (targetId : CreatureId) (instId : PowerInstan
   cs.updateCreature targetId fun c =>
     { c with powers := c.powers.filter (·.instanceId != instId) }
 
-/-- Tick down a duration-based power (`Vulnerable`, `Weak`, etc.), respecting `SkipNextDurationTick`.
+/-- Remove all instances matching `powerModelId` from `targetId`. Ref: `PowerCmd.Remove<T>`. -/
+def removePowerByModel (cs : CombatState) (targetId : CreatureId) (powerModelId : ModelId) : CombatState :=
+  cs.updateCreature targetId fun c =>
+    { c with powers := c.powers.filter (·.modelId != powerModelId) }
+
+/-- Clear `skipNextDurationTick` without decrementing (`RitualPower` / `TickDownDuration`). -/
+def clearSkipDurationTick (cs : CombatState) (targetId : CreatureId) (instId : PowerInstanceId) : CombatState :=
+  cs.updateCreature targetId fun c =>
+    { c with powers := c.powers.map fun q =>
+        if q.instanceId == instId then { q with skipNextDurationTick := false } else q }
+
+/-- Tick down a duration-based power (`Vulnerable`, `Weak`, `Frail`), respecting `SkipNextDurationTick`.
     Ref: `PowerCmd.TickDownDuration`. -/
 def tickDownDuration (cs : CombatState) (targetId : CreatureId) (instId : PowerInstanceId) : CombatState :=
   match cs.findCreature targetId |>.bind (·.powers.find? (·.instanceId == instId)) with
   | none => cs
   | some p =>
       if p.skipNextDurationTick then
-        cs.updateCreature targetId fun c =>
-          { c with powers := c.powers.map fun q =>
-              if q.instanceId == instId then { q with skipNextDurationTick := false } else q }
+        clearSkipDurationTick cs targetId instId
       else
         decrementPowerById cs targetId instId
 

@@ -1,8 +1,11 @@
 reference/
 sts2.zip
 .lake/
+/.agent_works/
 DiffTest/**/bin/
 DiffTest/**/obj/
+tools/**/bin/
+tools/**/obj/
 __pycache__/
 *.pyc
 .DS_Store
