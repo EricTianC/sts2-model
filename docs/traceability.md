@@ -1,6 +1,10 @@
 # STS2 Lean 4 逻辑建模溯源与验证审计矩阵
 
-本文档记录 `sts2_ideal` 项目中每个 Lean 4 模型、定理、静态目录提取脚本及 `.NET 9` 差分测试预言机与反编译 C# 参考源码（`reference/sts2/`，解压自 `sts2.zip`）的精确对应关系。
+本文档记录 `sts2_ideal` 项目中每个 Lean 4 模型、定理、静态目录提取脚本及 `.NET 9` 差分测试预言机与反编译 C# 参考源码（`reference/sts2/`）的精确对应关系。Windows x64 的同版本参考树可按 [本地重建流程](../README.md#从本机安装重建-c-参考源码)导出；`decompilation.json` 记录输入程序集、引用和 C# 产物的指纹。
+
+**规则与证据边界**：`v0.113.1`（`d09d48e5`）的原版无 UI 规则只从核验后的 C# 调用链建模，含基类、命令和钩子。反编译结果不清楚时看同一程序集的 IL，不以局部录制替代规则。种子、解锁进度、玩家选择和服务器时间作为输入。目录收录、行为实现、独立 C# 差分、实机观测是不同证据；未录到的分支仍按源码实现和构造定向用例。
+
+**换机后的首批行为建模**：先做 `RingOfTheSnake` 和 `BagOfPreparation`。两者的 `ModifyHandDraw` 都只给持有者在 `TurnNumber ≤ 1` 时加 2。沿 `Hook.ModifyHandDraw` → `CombatManager.SetupPlayerTurn` 核对普通／Late 两阶段，以及 Innate、手牌上限的处理顺序；Lean 接点是 `Hook/Pipeline.lean` 与 `Combat/TurnLoop.lean::setupPlayerTurn`。验收覆盖两遗物叠加、不影响其他玩家及后续回合、不改变普通效果抽牌。`Akabeko` 留给攻击生命周期批次：它施加的 Vigor 要追踪整条攻击命令和起始层数，不能近似成每次伤害扣层。
 
 - **Lean 工具链**: `leanprover/lean4:v4.36.0`（纯 `Std`，零 `Mathlib`）
 - **可信核保证**: `Sts2Model/` 与 `Sts2Sim/` 的代码主体无 `sorry`、自定义 `axiom` 或 `native_decide`

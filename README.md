@@ -1,6 +1,6 @@
 # sts2_ideal — 《杀戮尖塔 2》(Slay the Spire 2) Lean 4 逻辑建模参考项目
 
-面向 **Slay the Spire 2 (STS2) Mod 开发者**的完整可执行 Lean 4 形式化建模与跨语言差分验证参考工程，严格溯源于反编译 C# 参考源码（`sts2.zip` → `reference/sts2/`）。
+面向 **Slay the Spire 2 (STS2) Mod 开发者**的完整可执行 Lean 4 形式化建模与跨语言差分验证参考工程，严格溯源于本地反编译 C# 参考源码（`reference/sts2/`）。
 
 ## 核心设计保障
 
@@ -65,6 +65,27 @@ uv run python scripts/check_observed_survivor.py CAPTURE_DIR
 三种证据独立：`.run` schema 9 核对录入的路线事实与跨点账目，不能导出地图边；`.save` schema 16 核对当前幕存图及已走的边，不能确认领过奖励或终局；Survivor 脚本只比较归档的开场 `#1→#5` 与独立的 `#21→#22`，没有重演中间回合。不修改或上传原版文件。
 
 实机验收：v0.107.1 的 SILENT 胜局三幕 17/16/15 点，47 次跨点余额相符；副本第二点金币加 1 即报错。schema 16 存图的当前幕索引为 1、16 个已访问坐标与 15 条边；只删除 `(3,0)→(4,1)` 即报首段断边。两份文件不同局，不拼接验收。
+
+---
+
+## 从本机安装重建 C# 参考源码
+
+Windows x64，使用 Python 3.11+。当前基线锁定 **STS2 `v0.113.1` (`d09d48e5`) / ILSpy `11.2.0.10050`**。输入是 Mod 教程所用的原版 `data_sts2_windows_x86_64/sts2.dll`，不是录制 Mod 的 DLL，也不需要解包 `.pck`。`release_info.json`、同目录的 `sts2.xml` 及依赖 DLL 必须留在原位。
+
+原版无 UI 玩法的规则以经版本核验的 `reference/sts2/` C# 及其调用链为唯一建模参照；反编译有歧义时回查同一 `sts2.dll` 的 IL。种子、解锁进度、玩家选择与服务器时间是输入。实机录制只用于独立验收状态和时序，不用下一帧推断规则或补齐模型状态；源码覆盖与实机覆盖分别记录。
+
+```bash
+# 替换为本机 Steam 游戏目录；若已有 reference/sts2，先输出并行候选
+uv run python scripts/decompile_reference.py decompile "D:/SteamLibrary/steamapps/common/Slay the Spire 2" --output-name sts2-d09d48e5-ilspy
+
+# 可选：从 GitHub Releases 下载自包含 GUI ZIP，并核对发布页的 SHA-256
+uv run python scripts/decompile_reference.py gui
+```
+
+- **自动导出**：从 NuGet.org 拉取同版本官方 Native AOT `ilspycmd.win-x64`，验 SHA-256 后运行，不需要安装 .NET SDK 或全局工具。脚本校验游戏版本、`sts2.dll` / `sts2.xml` 的 SHA-256、MVID、33 个直接引用是否齐全，以及导出的 3,887 个 C# 文件的全树指纹。成功后才发布目录并写入 `decompilation.json`（含依赖与产物指纹）；不覆盖已有目录，不修改游戏安装。首次建库可省略 `--output-name`，直接生成 `reference/sts2/`。
+- **手动复查**：解压 `.agent_works/ilspy/` 中验过摘要的 ZIP，启动 `ILSpy.exe`，打开本机原版 `sts2.dll`。在 C# 与 IL 视图交叉检查可疑方法；手动导出不替代脚本的基线校验。参见 [ILSpy 官方发布](https://github.com/icsharpcode/ILSpy/releases/tag/v11.2)、[命令行参数](https://github.com/icsharpcode/ILSpy/tree/v11.2/ICSharpCode.ILSpyCmd)与 [STS2 Mod 教程](https://tutorials.sts2modding.com/docs/02-install-view-source-and-patch/)。
+
+`reference/` 和 `.agent_works/` 均为本地目录，不提交程序集、工具包或反编译源码。Steam 更新后，先核对新构建与候选源码，再更新锁定值；不要跳过校验或直接覆盖当前已核对的参考树。
 
 ---
 
