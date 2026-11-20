@@ -1,0 +1,11 @@
+{
+  "id": "Sts2StateRecorder",
+  "name": "STS2 Full State & Action Recorder",
+  "author": "sts2_ideal",
+  "description": "Lossless full-state and action NDJSON recorder (Track A) for Slay the Spire 2 formal verification and differential testing.",
+  "version": "1.0.0",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false,
+  "dependencies": []
+}
