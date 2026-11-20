@@ -3,7 +3,7 @@
 本文档记录 `sts2_ideal` 项目中每个 Lean 4 模型、定理、静态目录提取脚本及 `.NET 9` 差分测试预言机与反编译 C# 参考源码（`reference/sts2/`，解压自 `sts2.zip`）的精确对应关系。
 
 - **Lean 工具链**: `leanprover/lean4:v4.36.0`（纯 `Std`，零 `Mathlib`）
-- **可信核保证**: 全项目 `Sts2Model/` 与 `Sts2Sim/` 共 **14,927 行** Lean 代码，**0 `sorry`**、**0 `axiom`**、**0 `native_decide`**
+- **可信核保证**: `Sts2Model/` 与 `Sts2Sim/` 的代码主体无 `sorry`、自定义 `axiom` 或 `native_decide`
 - **核心边界保证**: 核心 `Sts2Model/` 不含特定复盘启发式或求解算法，且绝不 `import Sts2Model.Examples.*`；具体下游工具示例如 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) 严格建构在核心公开 API 之上
 - **差分验证工具**: `.NET 9` (`net9.0`，零第三方 NuGet 包) + `uv run python`（仅使用 Python 标准库）
 
@@ -17,6 +17,7 @@
 |---|---|---|
 | [Sts2Model/Core/Dec.lean](../Sts2Model/Core/Dec.lean) | `System.Decimal`（贯穿 `Hook.cs`、`CreatureCmd.cs`、`PowerCmd.cs`、`Core.Models/*`） | 任意精度 base-10 有符号定点数 `(mantissa : Int, scale : Nat)`；`truncate` 采用 `Int.tdiv` 向零截断，严格对齐 C# `decimal.Truncate` 与 `(int)decimalVal`；含符号保号、交换律与单调性引理 |
 | [Sts2Model/Core/Enums.lean](../Sts2Model/Core/Enums.lean) | `Core.ValueProps/ValueProp.cs`, `ValuePropExtensions.cs` 及 `CardType` / `CardRarity` / `TargetType` / `CardKeyword` / `CardTag` / `PowerType` / `PowerStackType` / `PowerInstanceType` / `RelicRarity` / `PileType` 等枚举 | 位标志与枚举定义完全对应 C# 原值；提供 `isPowered` / `isUnblockable` 等扩展判定函数 |
+| [Sts2Model/Core/Enums.lean](../Sts2Model/Core/Enums.lean) 的 `AscensionLevel` / `AscensionVal` | `AscensionHelper.GetValueIfAscension` / `AscensionLevel` | A8 Tough Enemies 与 A9 Deadly Enemies 等进阶阈值；`AscensionVal.eval` 选择基础值或进阶值 |
 | [Sts2Model/Core/Ids.lean](../Sts2Model/Core/Ids.lean) | `Core.Models/ModelId.cs`, `AbstractModel.cs`, `Core.Entities.Models/DeterministicModelComparer.cs`, `Core.Combat/CombatId.cs` | `ModelId (category, entry)`、`CreatureId` / `PlayerId` / `CardInstanceId` 等运行时 ID、`CanonicalModel α` vs 可变战斗实例区分，及字典序/确定性比较 |
 | [Sts2Model/Core/Rng.lean](../Sts2Model/Core/Rng.lean) | `Core.Random/MegaRandom.cs`, `Rng.cs`, `RunRngSet.cs`, `Core.Extensions/ListExtensions.cs` | **Bit-exact** `SplitMix64` + `Xoshiro256**`、`NextDouble` / `NextFloat` / `NextGaussian` 前进状态及子 RNG 派生的 Fisher-Yates `UnstableShuffle`；含长度保持与置换群 (`List.Perm`) 证明 |
 
@@ -51,7 +52,7 @@
 | [Sts2Model/Command/OrbCmd.lean](../Sts2Model/Command/OrbCmd.lean) | `Core.Commands/OrbCmd.cs`, `Core.Models.Orbs/*.cs` | 充能球 `channel`（满槽时先触发首位 `evoke`）、`evoke`（Dark 打最高血量敌、Plasma 回能、Glass 双倍触发且衰减）、扩容/缩容 |
 | [Sts2Model/Combat/GameAction.lean](../Sts2Model/Combat/GameAction.lean) | `Core.GameActions/{GameAction,ActionExecutor,PlayCardAction,EndPlayerTurnAction,UndoEndPlayerTurnAction}.cs` | 多人同步确定的 `GameAction` 队列模型与序列化执行器 |
 | [Sts2Model/Combat/MonsterAI.lean](../Sts2Model/Combat/MonsterAI.lean) | `Core.MonsterMoves.MonsterMoveStateMachine/*.cs` | `MonsterState`（`MoveState` / `ConditionalBranchState` / `RandomBranchState`）与良基无环 (`StrictlyDecreasingRank`) 状态机解析 |
-| [Sts2Model/Combat/TurnLoop.lean](../Sts2Model/Combat/TurnLoop.lean) | `Core.Combat/CombatManager.cs`, `PlayerTurnPhase.cs` | `TurnPhase` 状态转移、两阶段回合结束、手牌冲刷 (`Retain` / `Ethereal`)、额外回合、胜利/失败判定（`PendingLoss` 优先、`ShouldStopCombatFromEnding` 阻断） |
+| [Sts2Model/Combat/TurnLoop.lean](../Sts2Model/Combat/TurnLoop.lean) | `Core.Combat/CombatManager.cs`、`Core.Models.Powers/{Poison,Doom,Plating,Ritual,Vulnerable,Weak,Frail}Power.cs`、`OrbQueue.cs` | 两阶段结束玩家回合，Hook 收集/执行回合始末效果；Poison 先伤后按存活减层、Doom 敌侧回合末处决、Plating 格挡与衰减、Ritual 叠加力量、球被动及停战早退 |
 
 ### 1.5 `Sts2Model/Multiplayer/`、`Sim/` 与 `Replay/` 无头多人时间线与仿真层
 
@@ -60,16 +61,16 @@
 | [Sts2Model/Multiplayer/ActionQueueSet.lean](../Sts2Model/Multiplayer/ActionQueueSet.lean) | `Core.Entities.Actions/GameActionState.cs`, `Core.Entities.Multiplayer/{GameActionType,PlayerChoiceOptions}.cs`, `Core.GameActions.Multiplayer/{ActionQueueSet,PlayerChoiceSynchronizer}.cs` | 多玩家独立动作队列、`getReadyAction` 最小 ID 选择、`pauseActionForPlayerChoice`（含 `cancelPlayCardActions` 与 `waitingForResumption` 缓冲）、`resumeAction` 及 `ChoiceStream` |
 | [Sts2Model/Replay/History.lean](../Sts2Model/Replay/History.lean) | `Core.Combat.History/CombatHistory.cs`, `Entries/*.cs` (18 种), `Core.Runs.History/*.cs` (9 种) | 全量 18 种战斗语义历史 (`CombatHistoryEntryEx`)、通用步索引包装 `TimedCombatHistoryEntry`、9 种局外历史 (`RunHistoryEntryEx`) 与单次命中归因快照 `DamageAttribution` |
 | [Sts2Model/Sim/EffectIR.lean](../Sts2Model/Sim/EffectIR.lean) | 脱机无 UI 效果 DSL（抽象自 `Cards/*.cs`, `Potions/*.cs`, `Monsters/*.cs`） | 闭环纯函数效果解释器（`execPlayCardHeadless`、`execUsePotionHeadless`、`execEnemyTurnHeadless`）与长尾 `OpaqueStateDelta` 黑盒步进 |
-| [Sts2Model/Sim/VanillaEffects.lean](../Sts2Model/Sim/VanillaEffects.lean) | `Core.Models.{Powers,Cards,Potions,Monsters}/*.cs` Tier-1 核心子集 | 11 种核心 Power 模板、20+ 高频卡牌、`FIRE_POTION` 等药水及 `COOP_GUARDIAN` / `CULTIST` 多回合 AI 蓝图 |
+| [Sts2Model/Sim/VanillaEffects.lean](../Sts2Model/Sim/VanillaEffects.lean) | `Core.Models.{Powers,Cards,Potions,Monsters}/*.cs` | `tier1EffectEnv` 保持轻量；`fullVanillaEffectEnv` 优先手写 Tier-1，其次生成 Tier-2，否则通用回退；`--inspect` 使用全量环境 |
 | [Sts2Model/Replay/Timeline.lean](../Sts2Model/Replay/Timeline.lean) | `Core.Multiplayer.Replay/{CombatReplay,CombatReplayEvent,CombatReplayEventType,CombatReplayWriter}.cs`, `ChecksumTracker.cs` | 统一时间线事件流、`buildArchive` 关键帧归档、随机定位 `seek`、通用分叉 `forkTimeline`、纯内核可归约 64 位 FNV-1a 状态校验和 (`computeStateChecksum`) 与视角切换 `switchViewer` |
-| [Sts2Model/Replay/TraceCodec.lean](../Sts2Model/Replay/TraceCodec.lean) | `NetFullCombatState.cs`, `CombatReplayEvent.cs`, `ChecksumTracker.cs` | 版本化外部 JSON 线协议 (`schemaVersion = 1`)、防截断 64 位十进制字符串序列化、宽容 `FromJson`、全量事件/状态编码解码、`verifyTraceChecksums` 审计与 `inspectArchiveStep` 无头步检视 |
+| [Sts2Model/Replay/TraceCodec.lean](../Sts2Model/Replay/TraceCodec.lean) | `NetFullCombatState.cs`, `CombatReplayEvent.cs`, `ChecksumTracker.cs` | `schemaVersion = 1`，64 位整数用十进制字符串，战斗 `ascensionLevel` 可缺省并回退到局状态；`verifyTraceChecksums` 与 `inspectArchiveStep` |
 
 ### 1.6 `Sts2Model/Mechanics/` 角色核心机制层
 
 | Lean 4 模块 | C# 参考源码 (`reference/sts2/`) | 建模范围与关键对齐点 |
 |---|---|---|
 | [Sts2Model/Mechanics/Orbs.lean](../Sts2Model/Mechanics/Orbs.lean) | `OrbModel.cs`, `Core.Models.Orbs/*.cs`, `FocusPower.cs`, `OrbCmd.cs` | Defect 充能球系统：Focus 免疫规则（Plasma 无视 Focus）、Glass 被动衰减与 `evoke = 2 * passive`、Dark 充能蓄力、Hibernate 护甲共享与回合始末触发顺序 |
-| [Sts2Model/Mechanics/Necrobinder.lean](../Sts2Model/Mechanics/Necrobinder.lean) | `Core.Commands/OstyCmd.cs`, `Core.Models.Powers/DieForYouPower.cs`, `DoomPower.cs` | Osty 召唤/复活、`DieForYouPower` 仅挡有动力 (`IsPowered`) 伤害且跳过已阵亡 Osty、`DoomPower` 当 `CurrentHp ≤ DoomAmount` 时即刻处决 |
+| [Sts2Model/Mechanics/Necrobinder.lean](../Sts2Model/Mechanics/Necrobinder.lean) | `Core.Commands/OstyCmd.cs`, `Core.Models.Powers/DieForYouPower.cs`, `DoomPower.cs` | Osty 召唤/复活与动力攻击代伤；模型在敌方回合末对 `HP ≤ DoomAmount` 的活目标调用 `kill`，未覆盖玩家侧 Doom 结算 |
 | [Sts2Model/Mechanics/Regent.lean](../Sts2Model/Mechanics/Regent.lean) | `Core.Commands/ForgeCmd.cs`, `Core.Models.Cards/SovereignBlade.cs`, `PlayerCombatState.cs` | 星辰 (`Stars`) 资源、1 点缺少的能量由 2 颗星替代 (`shouldPayExcessEnergyCostWithStars`)、`Forge` 自动生成/强化 `SovereignBlade` 并标记锻造状态 |
 | [Sts2Model/Mechanics/Fool.lean](../Sts2Model/Mechanics/Fool.lean) | `Core.Entities.FoolArrows/{ArrowSlot,ArrowStatus}.cs`, `Core.Commands/{ArrowCmd,MelodyCmd}.cs`, `ImpaledPower.cs` | `ArrowSlot` 状态流转（`Ready` / `Impaled` / `Destroyed`，已毁箭槽不可回收）与旋律 (`Wah` / `Cho` / `Ki`) 回合去重统计（每回合至多 3 种不同旋律） |
 | [Sts2Model/Mechanics/Dread.lean](../Sts2Model/Mechanics/Dread.lean) | `Core.Models.Dread/{DreadRunModel,DominionModel}.cs`, `Core.Models.Cards/AscendersBane.cs` | `Dread` 模式生命周期：`actIndex > 0` 插入 `Ascender's Bane`、进房附加 `Dominion`、进入 Boss 房强制清除当前幕 `Dominion` |
@@ -81,6 +82,7 @@
 | [Sts2Model/Run/Map.lean](../Sts2Model/Run/Map.lean) | `Core.Map/{MapCoord,MapPoint,StandardActMap}.cs` | 坐标图、行单调递增路径 (`StrictlyRowIncreasing`) 与 `ActMap` DAG 拓扑结构 |
 | [Sts2Model/Run/Odds.lean](../Sts2Model/Run/Odds.lean) | `Core.Odds/{CardRarityOdds,PotionRewardOdds,UnknownMapPointOdds}.cs`, `Core.Runs/RelicGrabBag.cs` | 双轨建模：精确 `Dec` 版 `CardRarityOddsDec`（供内核定量/边界定理证明）+ bit-exact IEEE-754 `Float32` 版 `CardRarityOddsF32`（供 `.NET 9` 位级对拍）；未知房间保底负概率排除与 `RelicGrabBag` 前后抽取队列 |
 | [Sts2Model/Run/RunLoop.lean](../Sts2Model/Run/RunLoop.lean) | `Core.Rewards/LinkedRewardSet.cs`, `Core.Runs/RunState.cs` | 地图跳转、`LinkedRewardSet` 互斥选取、切幕重置 `UnknownMapPointOdds` 与 Dread 领域状态刷新 |
+| [Sts2Model/Run/Expedition.lean](../Sts2Model/Run/Expedition.lean) | `RunManager.EnterMapCoord` / `EnterNextAct` / `WinRun`、`CombatRoom`、`Player.PopulateCombatState` / `AfterCombatEnd`、`RewardsSet` | 显式地图/房间输入，分离战斗实例与永久牌组，使用战斗引擎首次返回的结果；奖励处理、二 Boss 与最终事件分阶段 |
 
 ### 1.8 `Sts2Model/Catalog/`, `Examples/`, `Sts2Sim/`, `DiffTest/` 与 `scripts/`
 
@@ -93,13 +95,19 @@
 | [Sts2Model/Catalog/Verify.lean](../Sts2Model/Catalog/Verify.lean) | 纯 Lean 4 内核目录证明 | 自动生成：精确数量定理、ID 严格递增 + `Nodup` 定理（零 `native_decide`）与 `lookupCard`/`lookupRelic`/`lookupPower` |
 | [Sts2Model/Examples/VanillaShowcase.lean](../Sts2Model/Examples/VanillaShowcase.lean) | 30 个原版核心规则验证用例 | 覆盖伤害/格挡、Osty/Doom、Forge/SovereignBlade、Orb/Dark/Glass、Fool 箭矢与旋律、RNG 洗牌、地图/稀有度保底等 |
 | [Sts2Model/Examples/ModTemplates.lean](../Sts2Model/Examples/ModTemplates.lean) | 4 个 Mod 开发者模板与安全证明 | `modBloodthirst`（Power）、`modAegisWard`（Relic）、`modStarStrike`（Card）、`modComposition`（组合安全性） |
-| [Sts2Model/Examples/TimelineShowcase.lean](../Sts2Model/Examples/TimelineShowcase.lean) | 10 个核心时间线与编解码验证用例 | `allTimelineTests`（并发排队、早发唤醒、Seek 等价、视角切换、药水+怪物 AI、`OpaqueStateDelta`、`forkTimeline`、`TraceCodec` 往返/版本拒斥/篡改检出） |
+| [Sts2Model/Examples/TimelineShowcase.lean](../Sts2Model/Examples/TimelineShowcase.lean) | 14 个可执行 `Bool` 场景 | 前 10 个覆盖排队、唤醒、Seek、分叉、视角、Opaque 步与 Trace 往返/审计；`tl_11`–`tl_14` 覆盖生命周期、球、Tier-2 卡/药及怪物进阶效果，不是通用定理 |
 | [Sts2Model/Examples/ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) | **[非核心] 独立下游参考示例项目** | 演示如何仅调用公开核心 API 构建迟打易伤分析 `analyzeMissedVulnerable`、`branchCounterfactual`、`findLethalActionOrder`、2 项可运行校验与 CLI 演示 `runLateVulnerableDemo` |
-| [Sts2Sim/Main.lean](../Sts2Sim/Main.lean) | CLI 仿真器与差分测试入口 (`lake exe sts2sim`) | 默认运行 49 项内置断言测试；`--timeline-demo`、`--export-sample-trace`、`--inspect`；`--diff <input.tsv>` 运行 12 类差分测试预言机响应 |
+| [Sts2Sim/Main.lean](../Sts2Sim/Main.lean) | CLI 仿真器与 `--diff <input.tsv>` 入口 | 59 项回归；包含 [跨房、换幕与终局](../Sts2Model/Examples/ExpeditionShowcase.lean)。原生文件审计不使用 v1 Trace |
+| [Sts2Sim/RunHistoryAudit.lean](../Sts2Sim/RunHistoryAudit.lean) · [Sts2Sim/ActMapAudit.lean](../Sts2Sim/ActMapAudit.lean) | `RunHistory` / `MapPointHistoryEntry` 与 `SerializableRun` / `SerializableActMap` | 两个独立只读命令：schema 9 账目与终局记录，schema 16 当前幕图和已走边 |
+| [scripts/check_observed_survivor.py](../scripts/check_observed_survivor.py) | `Survivor.OnPlay` → `CardSelectCmd.FromHandForDiscard` → `FromHand` | 首次支付、移入 Play、给格挡，随后等本次预订的手牌实例选择并从原动作恢复；单候选/空手不消费 `PlayerChoice` 结果 |
 | [DiffTest/Sts2Oracle/Sts2Oracle.csproj](../DiffTest/Sts2Oracle/Sts2Oracle.csproj) | `.NET 9` 对拍项目配置 | `net9.0`，零第三方依赖 |
 | [DiffTest/Sts2Oracle/Program.cs](../DiffTest/Sts2Oracle/Program.cs) | `reference/sts2/` C# 语义直译对拍程序 | 按行解析 `--diff <input.tsv>`，支持 `--export-sample-trace` 与 `--verify-trace`，执行原生 C# `System.Text.Json` / `ulong` / `decimal` / `float` / FNV-1a 验证 |
+| [DiffTest/Sts2Oracle/CombatEffects.cs](../DiffTest/Sts2Oracle/CombatEffects.cs) | C# 回合与效果执行 | `RunRound` 共用回合序列；按生成操作/节点执行 `TIER2_EFFECTS`，不调用 Lean |
+| [tools/Sts2AstExtractor/Program.cs](../tools/Sts2AstExtractor/Program.cs) | 参考源码中的卡、药、怪物与能力定义 | SDK 内置 Roslyn AST：解析效果与怪物状态图；不能识别的语义拒收整条目 |
+| [Sts2Model/Sim/Generated/](../Sts2Model/Sim/Generated) · [Tier2OracleData.cs](../DiffTest/Sts2Oracle/Tier2OracleData.cs) | 同源生成的两端效果表 | Lean [Verify.lean](../Sts2Model/Sim/Generated/Verify.lean) 对数量、有序唯一性和结构良构提供纯内核证明 |
+| [提取审计](tier2_extraction_audit.md) · [全量卡牌清单](tier2_cards.json) | 用户侧提取审计 | 卡 373/717、药水 36/68、怪物 19/122；清单区分基础/升级程序与整卡拒收的首个源码位置；不将覆盖率或两端对拍视为游戏等价 |
 | [scripts/extract_catalog.py](../scripts/extract_catalog.py) | 方案 C 静态目录提取脚本 (`uv run python`) | 扫描 `reference/sts2/` 生成 `Cards.lean` / `Relics.lean` / `Powers.lean` / `Verify.lean` |
-| [scripts/run_diff_test.py](../scripts/run_diff_test.py) | `.NET 9` ↔ Lean 4 自动对拍脚本 (`uv run python`) | 生成 12 族共 850 条确定性 + 对抗性边界测试向量并执行 C# ↔ Lean 双向 JSON Trace 文件交接验证 |
+| [scripts/run_diff_test.py](../scripts/run_diff_test.py) | `.NET 9` ↔ Lean 4 对拍驱动 | 16 族 1110 条；保留逐行全串比较，固定预期分别核对两端，双向 JSON 文件交接；临时输入/输出隔离于 `.agent_works/diff-*` |
 
 ---
 
@@ -166,6 +174,11 @@
 | `map_filter_preserves_powerListInvariant` | 修改现有能力数值并清理零/非正条目后仍维持整个 `PowerListInvariant` |
 | `append_new_power_preserves_invariant` | 插入尚未持有的合法新能力保持 `PowerListInvariant`（区分 `None` 与 `InstancedPerApplier` 键语义） |
 | `artifact_blocks_visible_debuff` | 持有正数层 `Artifact` 时，首次生效的可见 Debuff 申请被完全抵消且 `Artifact` 层数减 1 |
+| [`tickDownDuration_clears_skip_without_decrementing`](../Sts2Model/Proofs/PowerSystem.lean#L185) | 已置跳过标志时仅清标志 |
+| [`tickDownDuration_decrements_when_not_skipped`](../Sts2Model/Proofs/PowerSystem.lean#L194) | 未置跳过标志时执行层数递减 |
+| [`thornsBehavior_ignores_unpowered_attacks`](../Sts2Model/Proofs/PowerSystem.lean#L203) | 无动力攻击不触发 Thorns |
+| [`poisonBehavior_emits_unblockable_unpowered_damage_and_decrement`](../Sts2Model/Proofs/PowerSystem.lean#L212) | Hook 发出无动力穿甲伤害和后续递减指令；执行器在伤后检查存活 |
+| [`doomBehavior_triggers_only_on_enemy_side`](../Sts2Model/Proofs/PowerSystem.lean#L228) | 模型 Hook 只在敌侧回合末发出处决指令 |
 
 ### 2.5 回合状态机与怪物 AI — [Sts2Model/Proofs/TurnMachine.lean](../Sts2Model/Proofs/TurnMachine.lean)
 
@@ -177,6 +190,9 @@
 | `victory_iff_conditions` | 胜利状态充要刻画：无等待失败、敌方主单位全灭、无监听器阻断 |
 | `win_loss_mutually_exclusive` | 胜利与失败严格互斥 |
 | `monster_stateMachine_terminates` | 具备良序等级函数 `rank` 的无环 `MonsterStateMachine` 必然在有限步内停机于 `MoveState` |
+| [`orb_turn_end_passives_preserve_capacity`](../Sts2Model/Proofs/TurnMachine.lean#L433) | 回合末球被动保持各玩家球槽容量 |
+| [`runSideTurnEndLifecycle_noop_when_not_in_progress`](../Sts2Model/Proofs/TurnMachine.lean#L459) | 停战后回合末生命周期保持原状态 |
+| [`ascensionVal_eval_monotone_when_asc_ge_base`](../Sts2Model/Proofs/TurnMachine.lean#L466) | 进阶值不低于基础值时，`eval` 随等级单调不减 |
 
 ### 2.6 PRNG 与多人确定性 — [Sts2Model/Proofs/Determinism.lean](../Sts2Model/Proofs/Determinism.lean)
 
@@ -273,7 +289,7 @@
 
 ## 4. `.NET 9` ↔ Lean 4 差分对拍覆盖与关键发现
 
-由 [scripts/run_diff_test.py](../scripts/run_diff_test.py) 自动生成 **850 条**向量并同时喂给 `sts2sim --diff` 与 `dotnet .../Sts2Oracle.dll --diff`，逐行比对全部 12 个确定性语义家族，并在最后自动执行 **C# ↔ Lean 双向 JSON Trace 文件交接验证 (`PASS`)**：
+由 [scripts/run_diff_test.py](../scripts/run_diff_test.py) 生成 **16 族 1110 条** TSV 向量，逐行全串比对 `sts2sim --diff` 与 `dotnet .../Sts2Oracle.dll --diff`。固定向量还将两端各自与源码预期比较，最后验证双向 v1 JSON Trace 文件交接。
 
 | 族 ID | 向量数 | 对拍目标与精度要求 |
 |---|---:|---|
@@ -289,7 +305,17 @@
 | `QUEUE_SET` | 60 | 多玩家并发 `ActionQueueSet`（入队取消守护、min-ID `getReadyAction`、`pauseActionForPlayerChoice` 仅阻断持有者、早发 `resumeAction` 缓冲、停战清理） |
 | `TIMELINE_SEEK` | 60 | 双人协作多回合无头回放（出牌 + 药水 + 跨回合 `Rng.unstableShuffle` 重洗 + `COOP_GUARDIAN` AI + 关键帧 `seek` + 64 位 FNV-1a 状态校验和位一致） |
 | `TRACE_JSON` | 60 | `schemaVersion = 1` 外部 JSON 线协议（`> 2^53` 全 64 位字符串 `runSeed`、`CULTIST` / `COOP_GUARDIAN` 多回合、`Artifact` / 药水 / 局外 `runSync` / `opaqueStep` 与双向序列化回放 FNV-1a 一致性） |
-| **合计** | **850** | **当前对拍结果：850/850 完全一致（0 Mismatches）+ 双向 JSON 文件交接 `PASS`** |
+| `TURN_LIFECYCLE` | 60 | 减益首次跳过和有符号 Artifact 判定、Poison 存活减层、敌侧 Doom、Thorns、Plating、Ritual、五种球的 Focus/停战边界 |
+| `TIER2_EFFECTS` | 80 | 40 张卡牌版本用例、16 药水、20 怪物、4 缺表边界；验证效果而非出牌支付。怪物初始 HP 由 TSV 提供，仅对拍动作参数的进阶缩放和实际执行的 move |
+| `TIER2_CARD` | 119 | 读实时格挡/弃牌/能量，带条件的出牌，球槽边界、对象作用域与同名实例的整场费用；对拍基础/升级和固定源码预期 |
+| `EXPEDITION` | 1 | [独立 C# 参考](../DiffTest/Sts2Oracle/ExpeditionReference.cs)：合法图边、跨幕、已结算房恢复、战败、奖励互斥、战斗实例清理；不是原版 RNG 或游戏整局对拍 |
+| **合计** | **1110** | **逐行比较与两端固定预期；之后双向 JSON 交接** |
+
+`found=1` 仅表示对应 Tier-2 表存在 ID（如执行 `NOTHING` 的 `BIG_DUMMY`）；`found=0` 不排除 Tier-1 效果（如 `HEAL_POTION`）。代表锚点独立取自 `ThornsPower.BeforeDamageReceived`、`DaggerThrow.OnPlay`、`Bloodletting.OnPlay`、`SuckerPunch.OnPlay`、`PotionOfDoom.OnUse` 和 `BowlbugEgg.BiteMove`。
+
+共享生成表对拍验证的是两个解释器在向量上的一致性，不证明提取器与游戏等价。固定种子的加权分支只锁定模型 RNG；未注册能力的持续行为不在覆盖范围。`ShrinkPower.StackType` 随层数动态变化，而表中为静态值，不能作为原版预期。`FightMe.OnUpgrade` 的属性与规范键现在指向同一个变量，升级固定预期为两击各 6、自己力量 +4、对手 +1。
+
+原生文件验收不能合并：v0.107.1 的 48 点胜局只核对该局报告的事实与 47 次跨点余额；schema 16 保存地图只核对当前幕路线；v0.111.1 的战斗归档只核对 `#1→#5` 与独立的 `#21→#22` 的投影。没有同局动作流就不称为整局逐动作重演。
 
 ### 差分测试捕获的真实语义边界示例（`CARD_COST` #505 / #513）
 

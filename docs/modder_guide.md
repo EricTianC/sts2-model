@@ -13,9 +13,9 @@ sts2_ideal/
 │   ├── Model/       # Cost、Card、Power、Creature、Orb、Player、CombatState/RunState
 │   ├── Hook/        # Registry (154 hooks)、ModHelper (HookBehavior / Pool & Hook 注册表)、Pipeline
 │   ├── Command/     # AttackCommand、CreatureCmd、CardCmd、PowerCmd、OrbCmd
-│   ├── Combat/      # GameAction 队列、MonsterAI 状态机、TurnLoop 回合控制
+│   ├── Combat/      # GameAction 队列、MonsterAI 状态机、Hook 驱动的回合生命周期
 │   ├── Multiplayer/ # 多玩家并发 ActionQueueSet 与 PlayerChoiceSynchronizer
-│   ├── Sim/         # 无 UI EffectIR 解释器、OpaqueStateDelta 与 Tier-1 原版内容
+│   ├── Sim/         # EffectIR、OpaqueStateDelta、分层环境与 Generated/ Tier-2 表
 │   ├── Replay/      # 18+9 语义历史与通用步索引、关键帧 Seek / forkTimeline 分叉原语 / FNV-1a、外部 JSON Trace 线协议 (TraceCodec)
 │   ├── Mechanics/   # Orbs、Necrobinder (Osty/Doom)、Regent (Stars/Forge)、Fool (Arrow/Melody)、Dread
 │   ├── Run/         # ActMap DAG、CardRarityOdds / UnknownMapPointOdds / RelicGrabBag、RunLoop
@@ -25,7 +25,8 @@ sts2_ideal/
 ├── Sts2Sim/         # 可执行验证入口 (`lake exe sts2sim`、`--timeline-demo`、`--export-sample-trace`、`--inspect`、`--diff`)
 ├── DiffTest/        # .NET 9 C# 对拍预言机 (`Sts2Oracle`, 零第三方依赖)
 ├── scripts/         # `extract_catalog.py` 与 `run_diff_test.py` (`uv run python`)
-└── docs/            # 溯源矩阵 (`traceability.md`) 与本开发指南 (`modder_guide.md`)
+├── tools/           # Sts2AstExtractor：.NET 9 SDK 内置 Roslyn 离线提取
+└── docs/            # 溯源、Mod 指南与 tier2_extraction_audit.md
 ```
 
 核心工程约束：
@@ -42,18 +43,24 @@ sts2_ideal/
 # 1. 编译全量 Lean 模型与证明
 lake build
 
-# 2. 运行全部 49 项内置可执行测试、外部 JSON 审计及脱机时间线演示
+# 2. 59 项回归（含显式地图、两幕流程与跨战斗状态边界）
 lake exe sts2sim
 lake exe sts2sim --timeline-demo
-lake exe sts2sim --export-sample-trace /tmp/sample_trace.json
-lake exe sts2sim --inspect /tmp/sample_trace.json --verify --viewer 2 --seek 2
+mkdir -p .agent_works
+lake exe sts2sim --export-sample-trace .agent_works/sample_trace.json
+lake exe sts2sim --inspect .agent_works/sample_trace.json --verify --viewer 2 --seek 2
 
-# 3. 编译 .NET 9 对拍预言机并执行 12 族 850 条跨语言差分测试 + 双向 JSON 交接验证
+# 3. 16 族 1110 条差分向量及双向 v1 JSON 交接
 dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo
 uv run python scripts/run_diff_test.py
 
 # 4. 可选：从 reference/sts2/ 重新生成原版 Cards/Relics/Powers 目录与 Nodup 证明
 uv run python scripts/extract_catalog.py
+
+# 5. 可选：从 reference/sts2/ 重建 Tier-2 Lean/C# 效果表和提取审计
+dotnet build tools/Sts2AstExtractor/Sts2AstExtractor.csproj --nologo
+dotnet run --no-build --project tools/Sts2AstExtractor/Sts2AstExtractor.csproj -- .
+uv run python scripts/check_tier2_cards.py --check-continuation
 ```
 
 ---
@@ -125,12 +132,20 @@ Regent 风格的费星双资源攻击牌 `modStarStrikeCardId`（由 `mkModStarS
 2. **自定义/长尾机制平滑接入**：在 [EffectIR.lean](../Sts2Model/Sim/EffectIR.lean) 中用纯代数 `EffectOp` 描述常规卡牌/药水/怪物 AI，对尚未手写建模的 Mod 事件或复杂特殊效果，直接插入 `TimelineEventKind.opaqueStep`（携带 `OpaqueStateDelta`）实现混合无头重放；
 3. **版本化外部 JSON Trace 线协议（实机 Mod ↔ Lean 无缝对接）**：通过 [TraceCodec.lean](../Sts2Model/Replay/TraceCodec.lean)（`schemaVersion = 1`），游戏内 `.NET 9` C# 录制 Mod 可把 `WireTraceBundle` 导出为 JSON（所有 64 位无符号整数 `runSeed`、`rng.s0..s3`、`checksum` 均以十进制字符串编码避免双精度浮点 `2^53` 截断，并由 [ReplayTimeline.lean](../Sts2Model/Proofs/ReplayTimeline.lean) 证明事件层双向无损与关键帧审计完备性），随后在命令行直接执行：
    ```bash
-   lake exe sts2sim --inspect match_trace.json --verify --viewer 2 --seek 3
+   lake exe sts2sim --inspect .agent_works/match_trace.json --verify --viewer 2 --seek 3
    ```
    即可在脱离 Godot/游戏本体的纯命令行中校验全部关键帧 FNV-1a 校验和、切换检视视角并跳转检查任意一步完整状态；
 4. **如何作为独立下游项目构建特定分析器（参考示例）**：具体业务层的分析与求解（例如局后迟打易伤扫描 `analyzeMissedVulnerable`、针对敌我总血量的 `branchCounterfactual`、有限步联机斩杀搜索 `findLethalActionOrder` 及专属案例见证定理 `late_vulnerable_counterfactual_witness`）并未硬编码进核心库，而是作为**独立的下游参考项目**放置在 [ReplayAnalyzerExample.lean](../Sts2Model/Examples/ReplayAnalyzerExample.lean) 中展示写法（可运行 `lake exe sts2sim --timeline-demo` 查看演示报告）。你在开发自己的 Mod 分析工具时，直接参照该文件在独立项目/命名空间内调用核心公共 API 即可。
 
+`vanillaEffectEnv` 是轻量 Tier-1，便于证明归约。需要运行已提取效果时，使用 `fullVanillaEffectEnv`（CLI 的 `--inspect` 默认使用它）：Tier-1 优先，其次 Tier-2，最后通用回退。外部 Trace 含 `schemaVersion = 1`；旧快照未提供战斗 `ascensionLevel` 时，按局状态读取。
+
 ---
+
+### 3.6 从一场遭遇推进到下一间房
+
+用 [`Expedition.step`](../Sts2Model/Run/Expedition.lean) 提交地图坐标、遭遇、战斗输入或奖励操作。`Except.error` 不返回任何后继；保留原状态即可重试。战斗从永久牌组成独立实例，结束后只提交永久状态。多选手牌的动作可暂停；用 `answerCardChoice` 回传本次预订的玩家、同步 ID、实例 ID，不能用手牌位置替代。示例见 [`ExpeditionShowcase`](../Sts2Model/Examples/ExpeditionShowcase.lean)。它不生成地图、房型、遭遇或奖励 RNG，也不把 v1 Trace 当作局存档。
+
+原生审核请分别运行 `--audit-run-history FILE`（schema 9，逐点有符号账目）和 `--audit-act-map FILE`（schema 16，当前幕地图与已走边）。退出码 `1` 是账目差异或路线错误，`2` 是不支持或输入错误。两项审核都不重演战斗。
 
 ## 4. 利用静态目录查找原版模型细节
 
@@ -148,6 +163,8 @@ lake build
 
 即可全自动重新生成 `Cards.lean` / `Relics.lean` / `Powers.lean` 与纯内核 `Nodup` 证明（不使用 `native_decide`）。
 
+静态目录是元数据，不是可执行效果覆盖。[全量卡牌清单](tier2_cards.json)包含 **373 项生成 / 344 项拒收**，另见[提取审计](tier2_extraction_audit.md)的药水 **36/68** 与怪物 **19/122**。更新参考版本时须全量重新提取和对拍；用 `uv run python scripts/check_tier2_cards.py --compare OLD_MANIFEST` 按 ID 核对增删、元数据、基础/升级程序与首个拒收原因。不能用单个卡牌源文件的时间戳跳过共享命令或能力变化。
+
 ---
 
 ## 5. 添加可执行测试与 `.NET 9` 差分对拍
@@ -159,9 +176,11 @@ lake build
 ### 5.2 增加 C# ↔ Lean 差分测试向量
 如果你想把一条自己的复杂算法（比如某种全新 Buff 叠加公式或牌费修正逻辑）纳入跨语言对拍：
 1. 在 `Sts2Sim/Main.lean` 的 `evalDiffLine` 中增加新的操作码分支；
-2. 在 `DiffTest/Sts2Oracle/Program.cs` 的主分发中用直译 C# 实现同一输入格式的分支；
-3. 在 `scripts/run_diff_test.py` 的 `generate_vectors()` 里生成几十条正常值 + 极值（负数、零、溢出界 `999999999`、`Unpowered`/`Unblockable` 组合）的 TSV 行；
-4. 重新构建两者并运行 `uv run python scripts/run_diff_test.py` 直到 `mismatches: 0`。
+2. 在 `DiffTest/Sts2Oracle/Program.cs` 的 `EvalLine` 分发中用独立 C# 实现同一输入格式；
+3. 在 `scripts/run_diff_test.py` 加入正常值、边界值及可从原版源码独立推导的固定预期，分别核对 Lean 与 C# 的结果；
+4. 构建后运行 `uv run python scripts/run_diff_test.py`，要求 `mismatches: 0` 与 `Bi-directional C# <-> Lean JSON trace handoff: PASS`。临时 TSV 和 JSON 由驱动放在 `.agent_works/diff-*`。
+
+`TIER2_EFFECTS` 只比较卡牌/药水效果或怪物动作，不检查费用支付或怪物初始 HP 缩放。`found` 是对应 Tier-2 表的 ID 存在位，独立于 Tier-1 回退和效果是否改变状态；两端读取同一提取结果，逐行一致不构成原版等价证明。
 
 ---
 

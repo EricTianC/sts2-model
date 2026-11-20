@@ -33,6 +33,9 @@
    - 自动化脚本（`scripts/`）一律通过 `uv run python ...` 运行，且仅使用 Python 标准库。
 6. **差分失败绝不放宽断言**：
    - 当 `.NET 9` 预言机与 Lean 4 (`lake exe sts2sim --diff`) 出现任何不一致时，**必须立即核对 `reference/sts2/` 原版 C# 实现**并修复真实语义偏差，严禁修改断言阈值、跳过用例或掩盖差异。
+7. **非交付物只存本地**：
+   - 人工记录、交接、草稿、临时脚本、临时测试输入/输出与验证日志统一放在根目录 `.agent_works/`，不提交。
+   - 永久差分驱动、正式回归、可再生源码表及面向使用者的提取审计是交付物；Lake/MSBuild 的常规构建输出仍留在各自的忽略路径。
 
 ---
 
@@ -44,20 +47,22 @@
 | `Sts2Model/Model/` | `Cost`、`Card`、`Power`、`Creature`、`Orb`、`Player`、`State` (`CombatState` / `RunState`) |
 | `Sts2Model/Hook/` | `Hook.cs` 全量 154 个钩子名录与快照 (`Registry`)、`HookBehavior` / `ModHelper` 注册表、`Pipeline` |
 | `Sts2Model/Command/` | `AttackCommand`、`CreatureCmd`、`CardCmd`、`PowerCmd`、`OrbCmd` |
-| `Sts2Model/Combat/` | 多人确定性 `GameAction` 队列、`MonsterAI` 无环状态机、`TurnLoop` (`CombatManager`) |
+| `Sts2Model/Combat/` | 多人确定性 `GameAction` 队列、`MonsterAI` 无环状态机、`TurnLoop` 的 Hook 驱动回合生命周期 |
 | `Sts2Model/Multiplayer/` | 多人并发 `ActionQueueSet`（分玩家队列、选牌暂停/唤醒、取消标志）与 `PlayerChoiceSynchronizer` |
-| `Sts2Model/Sim/` | 无 UI 效果原语解释器 (`EffectIR`)、`OpaqueStateDelta` 回退与 Tier-1 原版内容 (`VanillaEffects`) |
+| `Sts2Model/Sim/` | 无 UI 效果解释器 (`EffectIR`)、`OpaqueStateDelta` 与分层效果环境（Tier-1 → Tier-2 → 通用回退） |
+| `Sts2Model/Sim/Generated/` | Tier-2 效果表、怪物状态图及纯内核数量、`Nodup` 与结构良构证明 |
 | `Sts2Model/Replay/` | 全 18+9 语义历史 (`History` 含 `TimedCombatHistoryEntry`)、关键帧 Seek / `forkTimeline` 与 64 位 FNV-1a (`Timeline`)、版本化外部 Trace JSON 线协议 (`TraceCodec`) |
 | `Sts2Model/Mechanics/` | `Orbs` (Defect)、`Necrobinder` (Osty / Doom)、`Regent` (Stars / Forge)、`Fool` (Arrow / Melody)、`Dread` |
-| `Sts2Model/Run/` | `ActMap` DAG、`CardRarityOdds` / `UnknownMapPointOdds` / `RelicGrabBag`、`RunLoop` |
+| `Sts2Model/Run/` | `ActMap` DAG、`CardRarityOdds` / `UnknownMapPointOdds` / `RelicGrabBag`、`RunLoop`、显式单人 `Expedition` |
 | `Sts2Model/Catalog/` | 由 `scripts/extract_catalog.py` 自动生成的 `Cards` (717) / `Relics` (316) / `Powers` (304) 与 `Verify.lean` |
 | `Sts2Model/Proofs/` | 9 个形式化证明模块：`DamagePipeline`、`HookSafety`、`CardPiles`、`PowerSystem`、`TurnMachine`、`Determinism`、`Mechanics`、`MapTopology`、`ReplayTimeline` |
-| `Sts2Model/Examples/` | `VanillaShowcase.lean`（30 个原版规则）、`ModTemplates.lean`（4 个 Mod 模板）、`TimelineShowcase.lean`（10 个通用时间线与 `TraceCodec` 验证），以及独立下游示例 `ReplayAnalyzerExample.lean`（2 项复盘/求解示例 + `--timeline-demo`） |
+| `Sts2Model/Examples/` | 原版、Mod 模板、时间线、独立下游和跨房换幕流程示例 |
 | `Sts2Model.lean` | 公共伞形导出模块；新增 `Sts2Model/**/*.lean` 后必须同步在此 `import` |
-| `Sts2Sim/Main.lean` | `lake exe sts2sim` 回归测试（49 项断言）、`--timeline-demo`、`--export-sample-trace`、`--inspect` 及 `--diff <tsv>` 对拍服务端 |
-| `DiffTest/Sts2Oracle/` | `.NET 9` C# 直译参考预言机（`Sts2Oracle.csproj`、`Program.cs`，含 `--diff`、`--export-sample-trace`、`--verify-trace`） |
-| `scripts/` | `extract_catalog.py`（静态目录抽取）与 `run_diff_test.py`（12 族 850 向量差分对拍 + 双向 JSON 文件交接验证） |
-| `docs/` | `traceability.md`（源码溯源与定理全表）与 `modder_guide.md`（Mod 开发者建模指南） |
+| `Sts2Sim/` | `lake exe sts2sim` 回归测试（59 项）、v1 Trace、`--diff`、原版局史与当前幕地图审计 |
+| `DiffTest/Sts2Oracle/` | `.NET 9` C# 预言机（`Program.cs`、`CombatEffects.cs`、生成表 `Tier2OracleData.cs`） |
+| `tools/Sts2AstExtractor/` | 使用 .NET 9 SDK 内置 Roslyn 离线生成 Lean/C# Tier-2 表与提取审计，零第三方包 |
+| `scripts/` | 静态目录与 Tier-2 卡牌清单校验、16 族 1110 向量、双向 JSON 交接、原生文件及战斗观测检查 |
+| `docs/` | [源码与定理溯源](docs/traceability.md)、[Mod 指南](docs/modder_guide.md)、[Tier-2 提取审计](docs/tier2_extraction_audit.md)与[卡牌清单](docs/tier2_cards.json)（373/717；保留全部 361 个基线 ID） |
 
 ---
 
@@ -70,6 +75,9 @@
   - 加减伤与格挡修正钩子必须严格检查 `props.isPoweredAttack` / `props.isPoweredCardOrMonsterBlock`；`ValueProp.unblockable` 跳过格挡吸收直接进入 `loseHpInternal`。
 - **Hook 快照语义**：
   - 钩子执行先对监听者列表做快照（`snapshotCombatListeners` / `snapshotRunListeners`），每步前经 `isListenerAlive` 重检，从而天然跳过循环期间已移除实体且不回溯触发新增实体。
+- **回合生命周期与层级分派**：
+  - 新施加与叠加的持续时间状态不能混用；Poison 伤后仅存活时减层；Thorns 的无动力反伤不穿甲。Doom 差分仅核验敌侧处决。
+  - Tier-2 `found` 只表示对应生成表含该 ID；不表示执行了有效果的动作。共享表的对拍验证执行一致性，不证明提取器或游戏等价。
 - **费用计算早返回 (`Hook.cs:1626`)**：
   - `Hook.ModifyEnergyCostInCombat` 在 `originalCost < 0` 时直接返回原值，跳过战斗内全局钩子，最终再在外层截断为 `max 0`（已由 `CARD_COST` 差分测试验证）。
 - **`ModHelper` 与目录边界**：
@@ -92,20 +100,27 @@ lake env lean --stdin <<'EOF'
 import Sts2Model
 #print axioms Sts2Model.Proofs.damage_block_hp_conservation
 #print axioms Sts2Model.Catalog.allCards_nodup
+#print axioms Sts2Model.Proofs.orb_turn_end_passives_preserve_capacity
+#print axioms Sts2Model.Sim.Generated.allGeneratedCards_nodup
 EOF
 
-# 4. 运行 49 项可执行回归测试、无 UI 演示与外部 JSON Trace 检视
+# 4. 运行 59 项回归（原版、模板、目录、时间线、下游、跨房）
 lake exe sts2sim
 lake exe sts2sim --timeline-demo
-lake exe sts2sim --export-sample-trace /tmp/sample_trace.json
-lake exe sts2sim --inspect /tmp/sample_trace.json --verify --viewer 2 --seek 2
+mkdir -p .agent_works
+lake exe sts2sim --export-sample-trace .agent_works/sample_trace.json
+lake exe sts2sim --inspect .agent_works/sample_trace.json --verify --viewer 2 --seek 2
 
-# 5. 构建 .NET 9 对拍预言机并执行 12 族 850 向量差分测试 + 双向 JSON 文件交接验证
+# 5. 16 族 1110 向量及双向 JSON 交接
 dotnet build DiffTest/Sts2Oracle/Sts2Oracle.csproj --nologo
 uv run python scripts/run_diff_test.py
 
 # 6. 从 reference/sts2/ 重新生成静态目录（仅在参考源码更新或调整解析器时执行）
 uv run python scripts/extract_catalog.py
+
+# 7. 从 reference/sts2/ 重建 Tier-2 表及审计
+dotnet build tools/Sts2AstExtractor/Sts2AstExtractor.csproj --nologo
+dotnet run --no-build --project tools/Sts2AstExtractor/Sts2AstExtractor.csproj -- .
 ```
 
 - **NixOS / Linux 运行提示**：`.NET 9` 在 Nix 环境通过 `dotnet` 包装器注入 `DOTNET_ROOT`，因此 `scripts/run_diff_test.py` 显式调用 `dotnet DiffTest/Sts2Oracle/bin/Debug/net9.0/Sts2Oracle.dll --diff <tsv>`，不要直接执行裸 apphost 二进制。其他临时 CLI 工具按需使用 `nix run nixpkgs#<name>`。
@@ -116,7 +131,7 @@ uv run python scripts/extract_catalog.py
 
 - **改逻辑必同步**：
   1. 新增 `Sts2Model/` 子模块时同步更新 `Sts2Model.lean`；
-  2. 修改或新增规则/不变量时同步补齐 `Sts2Model/Proofs/` 定理、`Sts2Sim/Main.lean` / `Examples/` 用例，以及（若属 12 大核心语义家族或新原版家族）`DiffTest/Sts2Oracle/Program.cs` + `scripts/run_diff_test.py`；
+  2. 修改或新增规则/不变量时同步补齐 `Sts2Model/Proofs/` 定理、`Sts2Sim/Main.lean` / `Examples/` 用例，并为对应的新旧原版语义家族更新两端差分实现与 `scripts/run_diff_test.py`；
   3. 确保 `fnv1aString` 保持纯内核可归约（避免使用不可在 Lean 内核 `decide` 展开的 `@[extern]` `ByteArray` 函数）并与 `.NET 9` `ComputeTimelineChecksum` 位精确同步；
   4. 更新目录脚本、定理名、计数或对拍覆盖面后同步刷新 `docs/traceability.md`、`docs/modder_guide.md` 与 `README.md`。
 - **提交风格**：采用常规语义化前缀与作用域（如 `chore:`、`feat(core,model):`、`feat(engine):`、`feat(catalog):`、`feat(proofs,examples):`、`test(sim,difftest):`、`docs:`），按逻辑层做原子提交；每次提交前确认 `git status` 不含 `reference/`、`sts2.zip`、`.lake/` 或 `.NET` 编译产物。
